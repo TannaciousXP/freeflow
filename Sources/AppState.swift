@@ -24,6 +24,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     case general
     case prompts
     case macros
+    case learnedCorrections
     case runLog
     case debug
 
@@ -40,6 +41,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: return "General"
         case .prompts: return "Prompts"
         case .macros: return "Voice Macros"
+        case .learnedCorrections: return "Learned Corrections"
         case .runLog: return "Run Log"
         case .debug: return "Debug"
         }
@@ -50,6 +52,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: return "gearshape"
         case .prompts: return "text.bubble"
         case .macros: return "music.mic"
+        case .learnedCorrections: return "brain.head.profile"
         case .runLog: return "clock.arrow.circlepath"
         case .debug: return "wrench.and.screwdriver"
         }
@@ -538,6 +541,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var hotkeyMonitoringErrorMessage: String?
     @Published var isDebugOverlayActive = false
     @Published var selectedSettingsTab: SettingsTab? = .general
+    @Published var learnedCorrections: [LearnedCorrection] = []
+    @Published var isSelfLearningEnabled: Bool = true {
+        didSet {
+            UserDefaults.standard.set(isSelfLearningEnabled, forKey: selfLearningEnabledStorageKey)
+            postInsertionMonitor.isEnabled = isSelfLearningEnabled
+        }
+    }
+    private let selfLearningEnabledStorageKey = "self_learning_enabled"
     @Published var pipelineHistory: [PipelineHistoryItem] = []
     @Published var debugStatusMessage = "Idle"
     @Published var debugShowsUpdateReminderAfterDictation = false
@@ -779,6 +790,29 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         // Clear any stale recording flag left over from an unclean exit.
         AppState.writeRecordingStateFlag(false)
+
+        // Self-learning preference: default on. Setting isSelfLearningEnabled
+        // here syncs the monitor's flag through didSet without persisting a
+        // redundant write on first launch.
+        let persistedSelfLearning = UserDefaults.standard.object(
+            forKey: selfLearningEnabledStorageKey
+        ) as? Bool
+        self.isSelfLearningEnabled = persistedSelfLearning ?? true
+        self.learnedCorrections = correctionLearningService.allCorrections()
+    }
+
+    func refreshLearnedCorrections() {
+        learnedCorrections = correctionLearningService.allCorrections()
+    }
+
+    func deleteLearnedCorrection(id: UUID) {
+        correctionLearningService.delete(id: id)
+        refreshLearnedCorrections()
+    }
+
+    func clearAllLearnedCorrections() {
+        correctionLearningService.clearAll()
+        refreshLearnedCorrections()
     }
 
     deinit {

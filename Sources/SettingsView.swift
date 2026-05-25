@@ -434,6 +434,8 @@ struct SettingsView: View {
                     PromptsSettingsView()
                 case .macros:
                     VoiceMacrosSettingsView()
+                case .learnedCorrections:
+                    LearnedCorrectionsSettingsView()
                 case .runLog:
                     RunLogView()
                 case .debug:
@@ -2715,5 +2717,148 @@ struct VoiceMacroEditorView: View {
                 payload = m.payload
             }
         }
+    }
+}
+
+struct LearnedCorrectionsSettingsView: View {
+    @EnvironmentObject var appState: AppState
+    @State private var showingClearConfirmation = false
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                SettingsCard("Self-Learning", icon: "brain.head.profile") {
+                    enableSection
+                }
+                SettingsCard("Learned Corrections", icon: "text.book.closed") {
+                    correctionsSection
+                }
+            }
+            .padding(24)
+        }
+        .onAppear {
+            appState.refreshLearnedCorrections()
+        }
+        .confirmationDialog(
+            "Clear all learned corrections?",
+            isPresented: $showingClearConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Clear All", role: .destructive) {
+                appState.clearAllLearnedCorrections()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This permanently removes every personalized substitution FreeFlow has learned. You can't undo this.")
+        }
+    }
+
+    private var enableSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: $appState.isSelfLearningEnabled) {
+                Text("Learn from my edits")
+                    .font(.headline)
+            }
+            Text(
+                "After each dictation, FreeFlow watches the focused field for ~20 seconds. If you replace a word, that substitution is recorded and applied to future dictations in the same app. Common English words, short words, and one-letter typos are never learned. Corrections are surfaced to post-processing only after being observed twice."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var correctionsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("\(appState.learnedCorrections.count) learned across all apps")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(action: { appState.refreshLearnedCorrections() }) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Reload from disk")
+
+                Button("Clear All") {
+                    showingClearConfirmation = true
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.red)
+                .disabled(appState.learnedCorrections.isEmpty)
+            }
+
+            if appState.learnedCorrections.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.tertiary)
+                    Text("Nothing learned yet")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                    Text("Dictate, then edit a word in the same field. FreeFlow will remember the substitution.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 24)
+            } else {
+                ForEach(groupedByApp, id: \.key) { group in
+                    correctionGroup(appBundle: group.key, items: group.value)
+                }
+            }
+        }
+    }
+
+    private func correctionGroup(appBundle: String, items: [LearnedCorrection]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(appBundle.isEmpty ? "Global" : appBundle)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.top, 8)
+            ForEach(items) { item in
+                HStack(spacing: 8) {
+                    Text(item.original)
+                        .font(.system(.body, design: .monospaced))
+                    Image(systemName: "arrow.right")
+                        .foregroundStyle(.tertiary)
+                        .font(.caption)
+                    Text(item.corrected)
+                        .font(.system(.body, design: .monospaced))
+                        .fontWeight(.medium)
+                    Spacer()
+                    Text("\(item.count)x")
+                        .font(.caption)
+                        .foregroundStyle(item.count >= CorrectionLearningService.defaultMinConfidence ? .secondary : .tertiary)
+                        .help(
+                            item.count >= CorrectionLearningService.defaultMinConfidence
+                                ? "Active — applied to future dictations"
+                                : "Below confidence threshold — needs one more observation"
+                        )
+                    Button {
+                        appState.deleteLearnedCorrection(id: item.id)
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.red)
+                }
+                .padding(.vertical, 4)
+                Divider()
+            }
+        }
+    }
+
+    private var groupedByApp: [(key: String, value: [LearnedCorrection])] {
+        let groups = Dictionary(grouping: appState.learnedCorrections) { $0.appBundle ?? "" }
+        return groups
+            .map { ($0.key, $0.value.sorted { $0.original.lowercased() < $1.original.lowercased() }) }
+            .sorted { lhs, rhs in
+                if lhs.0.isEmpty { return true }
+                if rhs.0.isEmpty { return false }
+                return lhs.0 < rhs.0
+            }
     }
 }
