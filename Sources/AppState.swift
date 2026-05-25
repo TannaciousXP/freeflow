@@ -549,6 +549,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
     private let selfLearningEnabledStorageKey = "self_learning_enabled"
+    /// Set to the most-recently learned correction for downstream subscribers.
+    @Published var lastLearnedToast: (original: String, corrected: String)?
+    /// Set to true after a successful dictation when the first-run disclosure hasn't been shown yet.
+    @Published var showFirstRunDisclosure: Bool = false
+    private var learnedCorrectionObserver: NSObjectProtocol?
     @Published var pipelineHistory: [PipelineHistoryItem] = []
     @Published var debugStatusMessage = "Idle"
     @Published var debugShowsUpdateReminderAfterDictation = false
@@ -799,6 +804,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
         ) as? Bool
         self.isSelfLearningEnabled = persistedSelfLearning ?? true
         self.learnedCorrections = correctionLearningService.allCorrections()
+
+        // Observe freeflow.didLearnCorrection posted by CorrectionLearningService.
+        // TODO uxPolish: depends on learningEvolution posting freeflow.didLearnCorrection
+        learnedCorrectionObserver = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("freeflow.didLearnCorrection"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let original = notification.userInfo?["original"] as? String,
+                  let corrected = notification.userInfo?["corrected"] as? String else { return }
+            self.lastLearnedToast = (original, corrected)
+            self.overlayManager.showLearnedToast(original: original, corrected: corrected)
+        }
     }
 
     func refreshLearnedCorrections() {
@@ -2691,6 +2710,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             }
                         } else {
                             self.statusText = completionStatusText
+                            if FirstRunDisclosure.shouldShow(appState: self) {
+                                self.showFirstRunDisclosure = true
+                            }
                             if shouldPersistRawDictationFallback {
                                 self.scheduleOverlayDismissAfterFailureIndicator(after: 2.5)
                             } else {
