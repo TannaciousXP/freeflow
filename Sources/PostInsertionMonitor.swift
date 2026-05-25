@@ -150,10 +150,9 @@ final class PostInsertionMonitor {
         let corrected: String
     }
 
-    /// Word-level LCS-based extraction. Returns substitution pairs where
-    /// `original[i]` and `edited[j]` are aligned outside the LCS in adjacent
-    /// positions — i.e. a clean single-word swap. Multi-word edits and
-    /// pure insertions/deletions are deliberately ignored.
+    /// Word-level LCS-based extraction. Returns substitution pairs for both
+    /// single-word swaps and multi-word runs (2–3 words each side, ±1 count
+    /// tolerance). Single-word behavior is unchanged.
     static func extractSingleWordSubstitutions(
         original: String,
         edited: String
@@ -162,16 +161,57 @@ final class PostInsertionMonitor {
         let editTokens = tokenizeWords(edited)
         guard !origTokens.isEmpty, !editTokens.isEmpty else { return [] }
 
-        let alignment = wordLevelLCSAlignment(origTokens, editTokens)
+        let raw = buildRawAlignment(origTokens, editTokens)
         var pairs: [CorrectionPair] = []
+        var residual: [AlignStep] = []
+
         var i = 0
-        while i < alignment.count {
-            let step = alignment[i]
+        while i < raw.count {
+            // Multi-word: contiguous N deletes then M inserts, N∈[2,3], |N-M|≤1.
+            if case .delete = raw[i] {
+                var dels: [String] = []
+                var j = i
+                while j < raw.count, case .delete(let w) = raw[j] { dels.append(w); j += 1 }
+                var ins: [String] = []
+                while j < raw.count, case .insert(let w) = raw[j] { ins.append(w); j += 1 }
+                let nd = dels.count, ni = ins.count
+                if nd >= 2 && nd <= 3 && ni >= 1 && abs(nd - ni) <= 1 {
+                    let orig = dels.joined(separator: " ")
+                    let corr = ins.joined(separator: " ")
+                    if orig.count <= 40 && corr.count <= 40 {
+                        pairs.append(CorrectionPair(original: orig, corrected: corr))
+                    }
+                    i = j; continue
+                }
+            }
+
+            // Vice-versa: contiguous N inserts then M deletes, N∈[2,3], |N-M|≤1.
+            if case .insert = raw[i] {
+                var ins: [String] = []
+                var j = i
+                while j < raw.count, case .insert(let w) = raw[j] { ins.append(w); j += 1 }
+                var dels: [String] = []
+                while j < raw.count, case .delete(let w) = raw[j] { dels.append(w); j += 1 }
+                let nd = dels.count, ni = ins.count
+                if ni >= 2 && ni <= 3 && nd >= 1 && abs(ni - nd) <= 1 {
+                    let orig = dels.joined(separator: " ")
+                    let corr = ins.joined(separator: " ")
+                    if orig.count <= 40 && corr.count <= 40 {
+                        pairs.append(CorrectionPair(original: orig, corrected: corr))
+                    }
+                    i = j; continue
+                }
+            }
+
+            residual.append(raw[i])
+            i += 1
+        }
+
+        // Single-word substitutions from the non-multi-word residual.
+        for step in collapseRaw(residual) {
             if case .substitute(let o, let e) = step {
-                // Only single-word adjacent substitutions in this v1.
                 pairs.append(CorrectionPair(original: o, corrected: e))
             }
-            i += 1
         }
         return pairs
     }
@@ -195,11 +235,8 @@ final class PostInsertionMonitor {
         case delete(String)
     }
 
-    /// Computes a Myers-style LCS alignment over word tokens, then converts
-    /// adjacent insert+delete pairs into a single `substitute` step. Pure LCS
-    /// gives us insert/delete pairs; the post-pass collapses those into the
-    /// substitute form that's actually useful for learning.
-    static func wordLevelLCSAlignment(_ a: [String], _ b: [String]) -> [AlignStep] {
+    /// Builds a raw LCS alignment (match/delete/insert only, no substitutes).
+    private static func buildRawAlignment(_ a: [String], _ b: [String]) -> [AlignStep] {
         let m = a.count
         let n = b.count
         var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
@@ -231,31 +268,23 @@ final class PostInsertionMonitor {
                 j -= 1
             }
         }
-        while i > 0 {
-            raw.append(.delete(a[i - 1]))
-            i -= 1
-        }
-        while j > 0 {
-            raw.append(.insert(b[j - 1]))
-            j -= 1
-        }
+        while i > 0 { raw.append(.delete(a[i - 1])); i -= 1 }
+        while j > 0 { raw.append(.insert(b[j - 1])); j -= 1 }
         raw.reverse()
+        return raw
+    }
 
-        // Collapse adjacent delete/insert into substitute. Order can be
-        // delete-then-insert or insert-then-delete; handle both.
+    /// Collapses adjacent delete/insert pairs (in either order) into substitute.
+    private static func collapseRaw(_ raw: [AlignStep]) -> [AlignStep] {
         var collapsed: [AlignStep] = []
         var k = 0
         while k < raw.count {
             if k + 1 < raw.count {
                 switch (raw[k], raw[k + 1]) {
                 case let (.delete(o), .insert(e)):
-                    collapsed.append(.substitute(o, e))
-                    k += 2
-                    continue
+                    collapsed.append(.substitute(o, e)); k += 2; continue
                 case let (.insert(e), .delete(o)):
-                    collapsed.append(.substitute(o, e))
-                    k += 2
-                    continue
+                    collapsed.append(.substitute(o, e)); k += 2; continue
                 default:
                     break
                 }
@@ -264,5 +293,11 @@ final class PostInsertionMonitor {
             k += 1
         }
         return collapsed
+    }
+
+    /// Computes a Myers-style LCS alignment over word tokens, then converts
+    /// adjacent insert+delete pairs into a single `substitute` step.
+    static func wordLevelLCSAlignment(_ a: [String], _ b: [String]) -> [AlignStep] {
+        collapseRaw(buildRawAlignment(a, b))
     }
 }
