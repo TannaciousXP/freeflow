@@ -382,7 +382,8 @@ Behavior:
         let vocabularyPrompt = if !normalizedVocabulary.isEmpty {
             """
 The following vocabulary must be treated as high-priority terms while rewriting.
-Use these spellings exactly in the output when relevant:
+Use these spellings exactly in the output when relevant.
+If the transcript contains a word that is phonetically close to one of these vocabulary terms (e.g. similar consonant skeleton), prefer the listed spelling.
 \(normalizedVocabulary)
 """
         } else {
@@ -491,7 +492,8 @@ Model: \(model)
         let vocabularyPrompt = if !normalizedVocabulary.isEmpty {
             """
 The following vocabulary must be treated as high-priority terms while rewriting.
-Use these spellings exactly in the output when relevant:
+Use these spellings exactly in the output when relevant.
+If the transcript contains a word that is phonetically close to one of these vocabulary terms (e.g. similar consonant skeleton), prefer the listed spelling.
 \(normalizedVocabulary)
 """
         } else {
