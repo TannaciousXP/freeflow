@@ -2723,6 +2723,7 @@ struct VoiceMacroEditorView: View {
 struct LearnedCorrectionsSettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var showingClearConfirmation = false
+    @State private var showingDisclosure = false
 
     var body: some View {
         ScrollView {
@@ -2738,6 +2739,10 @@ struct LearnedCorrectionsSettingsView: View {
         }
         .onAppear {
             appState.refreshLearnedCorrections()
+        }
+        .sheet(isPresented: $showingDisclosure) {
+            FirstRunDisclosureView()
+                .environmentObject(appState)
         }
         .confirmationDialog(
             "Clear all learned corrections?",
@@ -2765,6 +2770,13 @@ struct LearnedCorrectionsSettingsView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+            Button("Show explanation") {
+                showingDisclosure = true
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+            .foregroundStyle(Color.accentColor)
+            .padding(.top, 2)
         }
     }
 

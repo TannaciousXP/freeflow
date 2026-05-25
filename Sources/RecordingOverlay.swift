@@ -14,6 +14,8 @@ final class RecordingOverlayState: ObservableObject {
     // anchored to the focused field while the notch overlay does its own
     // initializing → recording → transcribing transitions.
     @Published var liveTranscript: String = ""
+    /// Text shown in the transient "just learned" toast pill.
+    @Published var learnedToastText: String = ""
 }
 
 enum OverlayPhase {
@@ -22,6 +24,8 @@ enum OverlayPhase {
     case transcribing
     case feedback
     case updateAvailable
+    /// Transient 3-second toast confirming a correction was learned.
+    case learnedToast
 }
 
 // MARK: - Panel Helpers
@@ -72,6 +76,7 @@ final class RecordingOverlayManager {
 
     var onStopButtonPressed: (() -> Void)?
     var onUpdateOverlayPressed: (() -> Void)?
+    private var toastDismissWorkItem: DispatchWorkItem?
 
     private var screenHasNotch: Bool {
         guard let screen = NSScreen.main else { return false }
@@ -277,7 +282,7 @@ final class RecordingOverlayManager {
         switch overlayState.phase {
         case .recording, .initializing, .transcribing, .feedback:
             return true
-        case .updateAvailable:
+        case .updateAvailable, .learnedToast:
             return false
         }
     }
@@ -334,6 +339,12 @@ final class RecordingOverlayManager {
             let updateWidth: CGFloat = 190
             guard screenHasNotch else { return updateWidth }
             return max(notchWidth, updateWidth)
+        }
+
+        if overlayState.phase == .learnedToast {
+            let toastWidth: CGFloat = 220
+            guard screenHasNotch else { return toastWidth }
+            return max(notchWidth, toastWidth)
         }
 
         let commandModeWidth: CGFloat = 180
@@ -397,6 +408,22 @@ final class RecordingOverlayManager {
             self.overlayState.liveTranscript = ""
             self.bubbleWindow?.orderOut(nil)
             self.bubbleWindow = nil
+        }
+    }
+
+    /// Shows a transient toast pill ("Learned: X → Y") for 3 seconds.
+    /// No-ops if the overlay is already in active use for recording/transcription.
+    func showLearnedToast(original: String, corrected: String) {
+        DispatchQueue.main.async {
+            // Don't disrupt an active recording or transcription session.
+            guard self.overlayWindow == nil else { return }
+            self.toastDismissWorkItem?.cancel()
+            self.overlayState.learnedToastText = "Learned: \(original) → \(corrected)"
+            self.overlayState.phase = .learnedToast
+            self.showOverlayPanel(animatedResize: false)
+            let work = DispatchWorkItem { [weak self] in self?.dismiss() }
+            self.toastDismissWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
         }
     }
 
@@ -921,6 +948,9 @@ struct RecordingOverlayView: View {
                 FailureIndicatorView()
             } else if state.phase == .updateAvailable {
                 UpdateAvailableOverlayView(onPress: onUpdateOverlayPressed)
+            } else if state.phase == .learnedToast {
+                LearnedToastView(text: state.learnedToastText)
+                    .transition(.opacity)
             } else {
                 ZStack {
                     Group {
@@ -996,6 +1026,21 @@ struct FailureIndicatorView: View {
             .frame(width: 20, height: 20)
             .background(Circle().fill(Color.red.opacity(0.92)))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Learned Toast View
+
+/// Transient pill shown for ~3 s after a correction is learned.
+struct LearnedToastView: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium, design: .rounded))
+            .foregroundStyle(.white.opacity(0.88))
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
