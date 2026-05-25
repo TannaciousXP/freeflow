@@ -150,6 +150,13 @@ final class CorrectionLearningService {
                     corrections[idx].distinctApps.insert(bundle)
                 }
                 let resultingCount = corrections[idx].count
+                if resultingCount == Self.defaultMinConfidence {
+                    NotificationCenter.default.post(
+                        name: Notification.Name("freeflow.didLearnCorrection"),
+                        object: nil,
+                        userInfo: ["original": trimmedOriginal, "corrected": trimmedCorrected]
+                    )
+                }
                 if normalizedBundle != nil {
                     promoteIfNeeded(original: trimmedOriginal, corrected: trimmedCorrected, now: now)
                 }
