@@ -13,8 +13,11 @@ import Foundation
 ///   1. Either side trims to fewer than 3 characters.
 ///   2. Either side, lowercased, is in the common-word set.
 ///   3. Either side contains only digits or punctuation.
-///   4. Levenshtein distance is exactly 1 AND the longer side is <= 6 chars
-///      (catches casual typos like "form"/"from").
+///
+/// A Levenshtein-1 short-word rule was considered but removed: every case it
+/// was meant to catch (form/from, runnig/running, definately/definitely) is
+/// already caught by the common-word filter, while it false-rejects useful
+/// proper-noun spelling fixes like "Aisha" -> "Aysha".
 enum CommonWordGuard {
     static func isAllowedAsLearnedCorrection(original: String, corrected: String) -> Bool {
         let a = sanitize(original)
@@ -23,11 +26,6 @@ enum CommonWordGuard {
         guard a.count >= 3, b.count >= 3 else { return false }
         if isCommonWord(a) || isCommonWord(b) { return false }
         if isDigitsOrPunctuationOnly(a) || isDigitsOrPunctuationOnly(b) { return false }
-
-        let distance = levenshtein(a.lowercased(), b.lowercased())
-        let longest = max(a.count, b.count)
-        if distance == 1 && longest <= 6 { return false }
-
         return true
     }
 
@@ -46,30 +44,6 @@ enum CommonWordGuard {
     private static func isDigitsOrPunctuationOnly(_ value: String) -> Bool {
         let allowed = CharacterSet.decimalDigits.union(.punctuationCharacters).union(.symbols)
         return value.unicodeScalars.allSatisfy { allowed.contains($0) }
-    }
-
-    private static func levenshtein(_ a: String, _ b: String) -> Int {
-        let aChars = Array(a)
-        let bChars = Array(b)
-        let m = aChars.count
-        let n = bChars.count
-        if m == 0 { return n }
-        if n == 0 { return m }
-        var prev = Array(0...n)
-        var curr = Array(repeating: 0, count: n + 1)
-        for i in 1...m {
-            curr[0] = i
-            for j in 1...n {
-                let cost = aChars[i - 1] == bChars[j - 1] ? 0 : 1
-                curr[j] = min(
-                    curr[j - 1] + 1,        // insert
-                    prev[j] + 1,            // delete
-                    prev[j - 1] + cost      // substitute
-                )
-            }
-            swap(&prev, &curr)
-        }
-        return prev[n]
     }
 
     // Top ~600 most-frequent English words plus a handful of common
