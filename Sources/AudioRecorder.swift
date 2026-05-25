@@ -87,6 +87,9 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     private var loggedCaptureFormat = false
     private var fileWriteError: Error?
     private var isSessionInterrupted = false
+    private var inflightPCMURL: URL?
+    private var inflightSidecarURL: URL?
+    private var inflightPCMHandle: FileHandle?
 
     @Published var isRecording = false
     private let _recording = OSAllocatedUnfairLock(initialState: false)
@@ -123,6 +126,11 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     private var failureReported = false
     private static let watchdogTimeout: TimeInterval = 2.0
     private static let sampleRateLogLimit = 40
+
+    static func inflightAudioDirectory() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("FreeFlow/audio", isDirectory: true)
+    }
 
     override init() {
         super.init()
@@ -208,6 +216,55 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             if session.isRunning {
                 session.stopRunning()
             }
+        }
+    }
+
+    private func createInflightFiles() {
+        try? inflightPCMHandle?.close()
+        inflightPCMHandle = nil
+        inflightPCMURL = nil
+        inflightSidecarURL = nil
+
+        let dir = AudioRecorder.inflightAudioDirectory()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let uuid = UUID().uuidString
+        let pcmURL = dir.appendingPathComponent("inflight-\(uuid).pcm")
+        let sidecarURL = dir.appendingPathComponent("inflight-\(uuid).json")
+
+        let meta: [String: Any] = [
+            "sampleRate": recordingTargetFormat.sampleRate,
+            "channels": Int(recordingTargetFormat.channelCount),
+            "bitDepth": 16,
+        ]
+        guard let metaData = try? JSONSerialization.data(withJSONObject: meta) else { return }
+        try? metaData.write(to: sidecarURL)
+
+        FileManager.default.createFile(atPath: pcmURL.path, contents: nil)
+        guard let handle = FileHandle(forWritingAtPath: pcmURL.path) else { return }
+        handle.seekToEndOfFile()
+
+        inflightPCMURL = pcmURL
+        inflightSidecarURL = sidecarURL
+        inflightPCMHandle = handle
+    }
+
+    private func appendToInflightIfNeeded(_ buffer: AVAudioPCMBuffer) {
+        guard let handle = inflightPCMHandle,
+              buffer.frameLength > 0,
+              let ptr = buffer.int16ChannelData?[0] else { return }
+        let data = Data(bytes: ptr, count: Int(buffer.frameLength) * MemoryLayout<Int16>.size)
+        try? handle.write(contentsOf: data)
+    }
+
+    private func deleteInflightFiles() {
+        if let url = inflightPCMURL {
+            try? FileManager.default.removeItem(at: url)
+            inflightPCMURL = nil
+        }
+        if let url = inflightSidecarURL {
+            try? FileManager.default.removeItem(at: url)
+            inflightSidecarURL = nil
         }
     }
 
@@ -378,6 +435,8 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             }
             self.activeAudioFile = nil
             self.activeAudioFormat = nil
+            try? self.inflightPCMHandle?.close()
+            self.inflightPCMHandle = nil
         }
 
         defer {
@@ -475,6 +534,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         if sourceFormat == targetFormat {
             try activeAudioFile.write(from: inputBuffer)
             recordedFrameCount += AVAudioFramePosition(inputBuffer.frameLength)
+            appendToInflightIfNeeded(inputBuffer)
             return
         }
 
@@ -486,6 +546,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         guard outputBuffer.frameLength > 0 else { return }
         try activeAudioFile.write(from: outputBuffer)
         recordedFrameCount += AVAudioFramePosition(outputBuffer.frameLength)
+        appendToInflightIfNeeded(outputBuffer)
     }
 
     private func validatedPCMBufferFormat(
@@ -704,6 +765,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
         os_log(.info, log: recordingLog, "capture session running with device %{public}@ [uid=%{public}@]", device.localizedName, device.uniqueID)
         tempFileURL = outputURL
+        createInflightFiles()
     }
 
     func startRecording(deviceUID: String? = nil) throws {
@@ -772,6 +834,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             if let discardURL {
                 try? FileManager.default.removeItem(at: discardURL)
             }
+            self.deleteInflightFiles()
             DispatchQueue.main.async {
                 self.isRecording = false
                 self.audioLevel = 0.0
@@ -785,6 +848,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
                 try? FileManager.default.removeItem(at: url)
                 self.tempFileURL = nil
             }
+            self.deleteInflightFiles()
         }
 
         if DispatchQueue.getSpecific(key: Self.sessionQueueKey) != nil {
