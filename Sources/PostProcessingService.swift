@@ -151,7 +151,8 @@ Behavior:
         context: AppContext,
         customVocabulary: String,
         customSystemPrompt: String = "",
-        outputLanguage: String = ""
+        outputLanguage: String = "",
+        learnedCorrections: [String: String] = [:]
     ) async throws -> PostProcessingResult {
         let vocabularyTerms = mergedVocabularyTerms(rawVocabulary: customVocabulary)
 
@@ -166,7 +167,8 @@ Behavior:
                     contextSummary: context.contextSummary,
                     customVocabulary: vocabularyTerms,
                     customSystemPrompt: customSystemPrompt,
-                    outputLanguage: outputLanguage
+                    outputLanguage: outputLanguage,
+                    learnedCorrections: learnedCorrections
                 )
             }
 
@@ -243,7 +245,8 @@ Behavior:
         contextSummary: String,
         customVocabulary: [String],
         customSystemPrompt: String = "",
-        outputLanguage: String = ""
+        outputLanguage: String = "",
+        learnedCorrections: [String: String] = [:]
     ) async throws -> PostProcessingResult {
         let primaryModel = resolvedPrimaryModel()
         let retryModel = resolvedRetryModel(for: primaryModel)
@@ -254,7 +257,8 @@ Behavior:
                 model: primaryModel,
                 customVocabulary: customVocabulary,
                 customSystemPrompt: customSystemPrompt,
-                outputLanguage: outputLanguage
+                outputLanguage: outputLanguage,
+                learnedCorrections: learnedCorrections
             )
         } catch let error as PostProcessingError {
             let shouldFallback: Bool
@@ -281,7 +285,8 @@ Behavior:
                 model: retryModel,
                 customVocabulary: customVocabulary,
                 customSystemPrompt: customSystemPrompt,
-                outputLanguage: outputLanguage
+                outputLanguage: outputLanguage,
+                learnedCorrections: learnedCorrections
             )
         }
     }
@@ -357,7 +362,8 @@ Behavior:
         model: String,
         customVocabulary: [String],
         customSystemPrompt: String = "",
-        outputLanguage: String = ""
+        outputLanguage: String = "",
+        learnedCorrections: [String: String] = [:]
     ) async throws -> PostProcessingResult {
         var request = URLRequest(url: URL(string: "\(baseURL)/chat/completions")!)
         request.httpMethod = "POST"
@@ -385,6 +391,10 @@ Use these spellings exactly in the output when relevant:
         }
         if !vocabularyPrompt.isEmpty {
             systemPrompt += "\n\n" + vocabularyPrompt
+        }
+        let learnedCorrectionsPrompt = Self.formatLearnedCorrectionsPrompt(learnedCorrections)
+        if !learnedCorrectionsPrompt.isEmpty {
+            systemPrompt += "\n\n" + learnedCorrectionsPrompt
         }
 
         let userMessage = """
@@ -562,6 +572,23 @@ Model: \(model)
             transcript: sanitizedTranscript,
             prompt: promptForDisplay
         )
+    }
+
+    /// Format the learned-corrections dictionary as a prompt section. Distinct
+    /// from `customVocabulary` because these are *directional* rules (replace
+    /// LEFT with RIGHT) learned from observing user edits, not just preferred
+    /// spellings.
+    static func formatLearnedCorrectionsPrompt(_ corrections: [String: String]) -> String {
+        guard !corrections.isEmpty else { return "" }
+        let rules = corrections
+            .sorted { $0.key.lowercased() < $1.key.lowercased() }
+            .map { "- \($0.key) -> \($0.value)" }
+            .joined(separator: "\n")
+        return """
+The user has personalized substitutions learned from prior dictation edits. Apply these as whole-word, case-insensitive replacements while preserving the rest of the transcript exactly:
+\(rules)
+These are surface replacements only. Never use them as license to add or remove unrelated content. If a rule's LEFT term does not appear as a whole word in the transcript, do not apply the rule.
+"""
     }
 
     static func applyOutputLanguage(_ prompt: String, language: String) -> String {

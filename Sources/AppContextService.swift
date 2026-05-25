@@ -9,6 +9,13 @@ struct AppSelectionSnapshot {
     let selectedText: String?
 }
 
+/// Snapshot of the currently focused text field, used by self-learning to
+/// observe what the user typed/edited after FreeFlow inserted dictated text.
+struct FocusedFieldSnapshot {
+    let text: String
+    let appBundle: String?
+}
+
 struct AppContext {
     let appName: String?
     let bundleIdentifier: String?
@@ -66,6 +73,43 @@ Return only two sentences, no labels, no markdown, no extra commentary.
     private func resolveContextPrompt() -> String {
         let trimmedPrompt = customContextPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedPrompt.isEmpty ? Self.defaultContextPrompt : trimmedPrompt
+    }
+
+    /// Returns the full text value of the currently focused UI element, along
+    /// with the frontmost app's bundle identifier. Returns nil if there is no
+    /// frontmost app, no focused element, or the focused element exposes no
+    /// `kAXValueAttribute` string (common for web views and custom controls).
+    /// Static because it depends only on system AX state, not on any
+    /// per-instance config — that lets `PostInsertionMonitor` use it without
+    /// holding a reference that could go stale when `AppState` rebuilds the
+    /// context service after settings changes.
+    static func snapshotFocusedField() -> FocusedFieldSnapshot? {
+        guard let frontmostApp = NSWorkspace.shared.frontmostApplication else { return nil }
+        let appElement = AXUIElementCreateApplication(frontmostApp.processIdentifier)
+
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedRef
+        ) == .success,
+              let focusedRaw = focusedRef,
+              CFGetTypeID(focusedRaw) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        let focusedElement = unsafeBitCast(focusedRaw, to: AXUIElement.self)
+
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            focusedElement,
+            kAXValueAttribute as CFString,
+            &valueRef
+        ) == .success,
+              let value = valueRef as? String,
+              !value.isEmpty else {
+            return nil
+        }
+        return FocusedFieldSnapshot(text: value, appBundle: frontmostApp.bundleIdentifier)
     }
 
     func collectSelectionSnapshot() -> AppSelectionSnapshot {

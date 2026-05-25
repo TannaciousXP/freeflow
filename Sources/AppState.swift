@@ -581,6 +581,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var audioDeviceObservers: [NSObjectProtocol] = []
     private var needsMicrophoneRefreshAfterRecording = false
     private let pipelineHistoryStore = PipelineHistoryStore()
+    private let correctionLearningService = CorrectionLearningService()
+    private lazy var postInsertionMonitor = PostInsertionMonitor(
+        learningService: correctionLearningService
+    )
     private let shortcutSessionController = DictationShortcutSessionController()
     private var activeRecordingTriggerMode: RecordingTriggerMode?
     private var currentSessionIntent: SessionIntent = .dictation
@@ -1149,6 +1153,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     intent: item.intent,
                     selectedText: item.selectedText
                 )
+                let retryLearnedCorrections = self.correctionLearningService.relevantCorrections(
+                    forAppBundle: restoredContext.bundleIdentifier
+                )
                 let result = await self.processTranscript(
                     parsedTranscript.transcript,
                     intent: restoredIntent,
@@ -1156,7 +1163,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     postProcessingService: postProcessingService,
                     customVocabulary: capturedCustomVocabulary,
                     customSystemPrompt: capturedCustomSystemPrompt,
-                    outputLanguage: self.outputLanguage
+                    outputLanguage: self.outputLanguage,
+                    learnedCorrections: retryLearnedCorrections
                 )
                 finalTranscript = result.finalTranscript
                 processingStatus = Self.statusMessage(
@@ -2362,7 +2370,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         postProcessingService: PostProcessingService,
         customVocabulary: String,
         customSystemPrompt: String,
-        outputLanguage: String = ""
+        outputLanguage: String = "",
+        learnedCorrections: [String: String] = [:]
     ) async -> (finalTranscript: String, outcome: TranscriptProcessingOutcome, prompt: String) {
         let trimmedRawTranscript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -2397,7 +2406,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 context: context,
                 customVocabulary: customVocabulary,
                 customSystemPrompt: customSystemPrompt,
-                outputLanguage: outputLanguage
+                outputLanguage: outputLanguage,
+                learnedCorrections: learnedCorrections
             )
             return (result.transcript, .postProcessingSucceeded, result.prompt)
         } catch {
@@ -2540,6 +2550,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     await MainActor.run { [weak self] in
                         self?.debugStatusMessage = "Running post-processing"
                     }
+                    let learnedCorrections = self.correctionLearningService.relevantCorrections(
+                        forAppBundle: appContext.bundleIdentifier
+                    )
                     let result = await self.processTranscript(
                         parsedTranscript.transcript,
                         intent: sessionIntent,
@@ -2547,7 +2560,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         postProcessingService: postProcessingService,
                         customVocabulary: self.customVocabulary,
                         customSystemPrompt: self.customSystemPrompt,
-                        outputLanguage: self.outputLanguage
+                        outputLanguage: self.outputLanguage,
+                        learnedCorrections: learnedCorrections
                     )
                     try Task.checkCancellation()
 
@@ -2621,7 +2635,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             }
 
                             let pendingClipboardRestore = self.writeTranscriptToPasteboard(trimmedFinalTranscript)
+                            let learningTranscript = trimmedFinalTranscript
                             self.pasteAtCursorWhenShortcutReleased {
+                                self.postInsertionMonitor.track(insertedText: learningTranscript)
                                 if shouldPressEnterAfterPaste {
                                     self.pressEnterAfterPaste {
                                         self.restoreClipboardIfNeeded(pendingClipboardRestore)
