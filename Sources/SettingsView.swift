@@ -2739,6 +2739,16 @@ struct LearnedCorrectionsSettingsView: View {
         }
         .onAppear {
             appState.refreshLearnedCorrections()
+            if appState.showFirstRunDisclosure {
+                showingDisclosure = true
+                appState.showFirstRunDisclosure = false
+            }
+        }
+        .onChange(of: appState.showFirstRunDisclosure) { newValue in
+            if newValue {
+                showingDisclosure = true
+                appState.showFirstRunDisclosure = false
+            }
         }
         .sheet(isPresented: $showingDisclosure) {
             FirstRunDisclosureView()

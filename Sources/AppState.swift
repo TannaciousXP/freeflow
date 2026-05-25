@@ -2711,7 +2711,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         } else {
                             self.statusText = completionStatusText
                             if FirstRunDisclosure.shouldShow(appState: self) {
+                                self.selectedSettingsTab = .learnedCorrections
                                 self.showFirstRunDisclosure = true
+                                NotificationCenter.default.post(name: .showSettings, object: nil)
                             }
                             if shouldPersistRawDictationFallback {
                                 self.scheduleOverlayDismissAfterFailureIndicator(after: 2.5)
