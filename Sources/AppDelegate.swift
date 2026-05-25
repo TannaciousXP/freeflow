@@ -34,6 +34,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             warmUpAudioCaptureIfAuthorized()
+            Task { @MainActor in AudioCrashRecovery.scanAndOfferRecovery(appState: self.appState) }
         }
 
     }

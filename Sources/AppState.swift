@@ -1022,6 +1022,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
+    func transcribeRecoveredAudio(url: URL) {
+        guard !isRecording, !isTranscribing else { try? FileManager.default.removeItem(at: url); return }
+        isTranscribing = true
+        transcriptionTask = Task { [weak self] in
+            defer { try? FileManager.default.removeItem(at: url) }
+            guard let self else { return }
+            if let raw = try? await self.makeTranscriptionService().transcribe(fileURL: url) {
+                await MainActor.run { self.isTranscribing = false; self.transcriptionTask = nil; _ = self.writeTranscriptToPasteboard(raw); self.pasteAtCursorWhenShortcutReleased() }
+            } else {
+                await MainActor.run { self.isTranscribing = false; self.transcriptionTask = nil }
+            }
+        }
+    }
+
     private var resolvedTranscriptionLanguage: String? {
         let normalized = Self.normalizeTranscriptionLanguage(transcriptionLanguage)
         return normalized.isEmpty ? nil : normalized
