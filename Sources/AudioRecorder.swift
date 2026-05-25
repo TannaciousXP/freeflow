@@ -150,6 +150,67 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         AVCaptureDevice.default(for: .audio) ?? AudioDevice.captureDevices().first
     }
 
+    private static let warmUpQueue = DispatchQueue(
+        label: "com.zachlatta.freeflow.capture.warmup",
+        qos: .userInitiated
+    )
+    private static let warmUpLock = OSAllocatedUnfairLock(initialState: false)
+
+    // On systems with multiple HAL plug-ins (e.g. ZoomAudioDevice, virtual
+    // routers) or with Continuity Camera registered, the *first*
+    // AVCaptureSession.startRunning() of the process can block for many
+    // seconds while CoreAudio negotiates device acquisition. That stall
+    // freezes the UI long enough for the user to release the dictation
+    // hotkey before any audio buffers flow, and the resulting "0 buffers"
+    // surfaces as a generic capture-session error. Paying the cost once
+    // off the main thread keeps the first real recording snappy.
+    static func warmUpDefaultDevice(deviceUID: String? = nil) {
+        let alreadyWarmed = warmUpLock.withLock { state -> Bool in
+            if state { return true }
+            state = true
+            return false
+        }
+        guard !alreadyWarmed else { return }
+
+        warmUpQueue.async {
+            let device: AVCaptureDevice?
+            if let deviceUID, !deviceUID.isEmpty, deviceUID != "default" {
+                device = captureDevice(forUID: deviceUID) ?? defaultCaptureDevice()
+            } else {
+                device = defaultCaptureDevice()
+            }
+            guard let device else { return }
+
+            let input: AVCaptureDeviceInput
+            do {
+                input = try AVCaptureDeviceInput(device: device)
+            } catch {
+                os_log(.error, log: recordingLog, "warmUp: failed to create input — %{public}@", error.localizedDescription)
+                warmUpLock.withLock { $0 = false }
+                return
+            }
+
+            let session = AVCaptureSession()
+            let output = AVCaptureAudioDataOutput()
+            session.beginConfiguration()
+            if session.canAddInput(input) {
+                session.addInput(input)
+            }
+            if session.canAddOutput(output) {
+                session.addOutput(output)
+            }
+            session.commitConfiguration()
+
+            let t0 = CFAbsoluteTimeGetCurrent()
+            session.startRunning()
+            let elapsed = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+            os_log(.info, log: recordingLog, "warmUp: startRunning took %.1fms (device %{public}@)", elapsed, device.localizedName)
+            if session.isRunning {
+                session.stopRunning()
+            }
+        }
+    }
+
     private func preferredCaptureDevice(
         for requestedDeviceUID: String?,
         reason: String
@@ -192,7 +253,19 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             queue: nil
         ) { [weak self] notification in
             let error = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError
-            let wrapped = error.map { AudioRecorderError.failedToStartCaptureSession($0.localizedDescription) }
+            if let error {
+                os_log(
+                    .error,
+                    log: recordingLog,
+                    "runtime error notification — domain=%{public}@ code=%ld userInfo=%{public}@",
+                    error.domain,
+                    error.code,
+                    String(describing: error.userInfo)
+                )
+            } else {
+                os_log(.error, log: recordingLog, "runtime error notification with no NSError payload")
+            }
+            let wrapped = error.map { AudioRecorderError.failedToStartCaptureSession("\($0.localizedDescription) [\($0.domain):\($0.code)]") }
                 ?? AudioRecorderError.failedToStartCaptureSession("Unknown runtime error")
             self?.reportRecordingFailure(wrapped)
         }
@@ -571,15 +644,12 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
         let session = AVCaptureSession()
         let dataOutput = AVCaptureAudioDataOutput()
-        dataOutput.audioSettings = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: recordingTargetFormat.sampleRate,
-            AVNumberOfChannelsKey: Int(recordingTargetFormat.channelCount),
-            AVLinearPCMBitDepthKey: bitDepth(for: recordingTargetFormat.commonFormat),
-            AVLinearPCMIsFloatKey: isFloatFormat(recordingTargetFormat.commonFormat),
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: !recordingTargetFormat.isInterleaved,
-        ]
+        // Don't force a specific audioSettings dictionary — on macOS 26.5
+        // explicit settings like 16 kHz mono Int16 cause the capture session
+        // to throw NSOSStatusErrorDomain -67440 immediately after startRunning.
+        // The downstream `appendSampleBufferToFile` path already converts
+        // arbitrary device-native formats (typically 48 kHz Float32) to the
+        // 16 kHz Int16 target via AVAudioConverter, so device-native is safe.
         dataOutput.setSampleBufferDelegate(self, queue: sampleBufferQueue)
 
         let input: AVCaptureDeviceInput

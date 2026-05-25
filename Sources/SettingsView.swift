@@ -274,7 +274,7 @@ struct ProviderSettingsFields: View {
                 Text("Transcription API URL")
                     .font(.caption.weight(.semibold))
                 HStack(spacing: 8) {
-                    TextField("Uses API Base URL when empty", text: $transcriptionAPIURLInput)
+                    TextField(AppState.defaultTranscriptionAPIURL, text: $transcriptionAPIURLInput)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.body, design: .monospaced))
                         .focused($transcriptionAPIURLFocused)

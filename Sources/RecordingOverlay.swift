@@ -9,6 +9,11 @@ final class RecordingOverlayState: ObservableObject {
     @Published var recordingTriggerMode: RecordingTriggerMode = .hold
     @Published var isCommandMode = false
     @Published var updateVersion: String = ""
+    // Live transcript shown in the SpeechBubble overlay when realtime
+    // streaming is active. Independent of `phase` so the bubble can stay
+    // anchored to the focused field while the notch overlay does its own
+    // initializing → recording → transcribing transitions.
+    @Published var liveTranscript: String = ""
 }
 
 enum OverlayPhase {
@@ -60,8 +65,10 @@ private func makeNotchContent<V: View>(
 
 final class RecordingOverlayManager {
     private var overlayWindow: NSPanel?
+    private var bubbleWindow: NSPanel?
     private let overlayState = RecordingOverlayState()
     private var lockedOverlayWidth: CGFloat?
+    private static let bubbleSize = CGSize(width: 360, height: 80)
 
     var onStopButtonPressed: (() -> Void)?
     var onUpdateOverlayPressed: (() -> Void)?
@@ -360,6 +367,68 @@ final class RecordingOverlayManager {
             panel.orderOut(nil)
             overlayWindow = nil
         }
+        hideBubble()
+    }
+
+    // MARK: - Speech Bubble (anchored to focused field)
+
+    /// Show the speech bubble near `rect` (focused-field rect in screen
+    /// coords, bottom-left origin). Independent panel from the notch
+    /// overlay so they don't compete for the single `overlayWindow` slot.
+    func showBubble(near rect: CGRect) {
+        DispatchQueue.main.async {
+            self.overlayState.liveTranscript = ""
+            self.ensureBubblePanel()
+            self.repositionBubble(near: rect)
+            self.bubbleWindow?.orderFrontRegardless()
+        }
+    }
+
+    /// Push streaming partials into the bubble. Cheap — just updates
+    /// the @Published value, SwiftUI rerenders.
+    func updateLiveTranscript(_ text: String) {
+        DispatchQueue.main.async {
+            self.overlayState.liveTranscript = text
+        }
+    }
+
+    func hideBubble() {
+        DispatchQueue.main.async {
+            self.overlayState.liveTranscript = ""
+            self.bubbleWindow?.orderOut(nil)
+            self.bubbleWindow = nil
+        }
+    }
+
+    private func ensureBubblePanel() {
+        if bubbleWindow != nil { return }
+        let panel = makeOverlayPanel(width: Self.bubbleSize.width, height: Self.bubbleSize.height)
+        panel.contentView = NSHostingView(
+            rootView: SpeechBubbleView().environmentObject(overlayState)
+        )
+        bubbleWindow = panel
+    }
+
+    private func repositionBubble(near rect: CGRect) {
+        guard let panel = bubbleWindow else { return }
+        let size = Self.bubbleSize
+        // Pick the screen containing the field so multi-display setups work.
+        let containingScreen = NSScreen.screens.first(where: { $0.frame.intersects(rect) })
+            ?? NSScreen.main
+        let visible = containingScreen?.visibleFrame ?? .zero
+
+        // Default: above the field with a 6pt gap, horizontally centered on it.
+        var origin = CGPoint(
+            x: rect.midX - size.width / 2,
+            y: rect.maxY + 6
+        )
+        // Flip below if it'd run off the top of the visible area.
+        if origin.y + size.height > visible.maxY {
+            origin.y = rect.minY - size.height - 6
+        }
+        // Clamp horizontally so it doesn't get cut off at the screen edge.
+        origin.x = max(visible.minX + 6, min(visible.maxX - size.width - 6, origin.x))
+        panel.setFrame(CGRect(origin: origin, size: size), display: true)
     }
 }
 
@@ -475,7 +544,7 @@ struct WaveformBar: View {
 
     var body: some View {
         Capsule()
-            .fill(.white)
+            .fill(.yellow)
             .frame(width: 3, height: minHeight + (maxHeight - minHeight) * amplitude)
     }
 }
@@ -598,7 +667,7 @@ struct CompactWaveformBar: View {
 
     var body: some View {
         Capsule()
-            .fill(.white)
+            .fill(.yellow)
             .frame(width: 2, height: minHeight + (maxHeight - minHeight) * amplitude)
     }
 }
@@ -948,5 +1017,45 @@ struct UpdateAvailableOverlayView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Speech Bubble
+
+/// Floating bubble anchored near the focused input field. Renders the
+/// streaming partial transcript in yellow so it reads as "this is what I'm
+/// hearing right now" without competing visually with the user's own typing.
+struct SpeechBubbleView: View {
+    @EnvironmentObject var state: RecordingOverlayState
+
+    private var displayText: String {
+        state.liveTranscript.isEmpty ? "Listening…" : state.liveTranscript
+    }
+
+    private var textColor: Color {
+        state.liveTranscript.isEmpty ? Color.yellow.opacity(0.55) : Color.yellow
+    }
+
+    var body: some View {
+        Text(displayText)
+            .font(.system(size: 14, weight: .medium, design: .rounded))
+            .foregroundStyle(textColor)
+            .multilineTextAlignment(.leading)
+            .lineLimit(3)
+            .truncationMode(.head)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.black.opacity(0.85))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.yellow.opacity(0.35), lineWidth: 1)
+                    )
+            )
+            .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+            .padding(4)
+            .animation(.easeOut(duration: 0.12), value: state.liveTranscript)
     }
 }

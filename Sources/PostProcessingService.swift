@@ -128,15 +128,15 @@ Behavior:
     private let baseURL: String
     private let preferredModel: String
     private let preferredFallbackModel: String
-    private let defaultModel = "openai/gpt-oss-20b"
-    private let defaultFallbackModel = "meta-llama/llama-4-scout-17b-16e-instruct"
+    private let defaultModel = "openai/gpt-4o-mini"
+    private let defaultFallbackModel = "anthropic/claude-3.5-haiku"
     private let defaultModelReasoningEffort = "low"
     private let postProcessingMaxCompletionTokens = 4096
     private let postProcessingTimeoutSeconds: TimeInterval = 20
 
     init(
         apiKey: String,
-        baseURL: String = "https://api.groq.com/openai/v1",
+        baseURL: String = "https://openrouter.ai/api/v1",
         preferredModel: String = "",
         preferredFallbackModel: String = ""
     ) {
@@ -144,6 +144,13 @@ Behavior:
         self.baseURL = baseURL
         self.preferredModel = preferredModel.trimmingCharacters(in: .whitespacesAndNewlines)
         self.preferredFallbackModel = preferredFallbackModel.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func modelAcceptsReasoningEffort(_ model: String) -> Bool {
+        // Only Groq's gpt-oss family accepts the reasoning_effort /
+        // include_reasoning payload keys. Sending them to gpt-4o-mini,
+        // Claude, Gemini etc. produces a 400 on some providers.
+        model.localizedCaseInsensitiveContains("gpt-oss")
     }
 
     func postProcess(
@@ -429,7 +436,7 @@ Model: \(model)
                 ]
             ]
         ]
-        if model == defaultModel {
+        if Self.modelAcceptsReasoningEffort(model) {
             payload["max_completion_tokens"] = postProcessingMaxCompletionTokens
             payload["reasoning_effort"] = defaultModelReasoningEffort
             payload["include_reasoning"] = false
@@ -537,7 +544,7 @@ Model: \(model)
                 ]
             ]
         ]
-        if model == defaultModel {
+        if Self.modelAcceptsReasoningEffort(model) {
             payload["max_completion_tokens"] = postProcessingMaxCompletionTokens
             payload["reasoning_effort"] = defaultModelReasoningEffort
             payload["include_reasoning"] = false

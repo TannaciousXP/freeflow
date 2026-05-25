@@ -655,6 +655,65 @@ Selected text: \(selectedText ?? "None")
         return CGRect(origin: point, size: size)
     }
 
+    /// Returns the screen rect of the focused UI element in NSScreen
+    /// (bottom-left origin) coordinates so callers can position NSPanels
+    /// directly.
+    ///
+    /// Tries in order: focused-UI-element AX rect → focused-window AX rect
+    /// → nil (caller is expected to use a screen-level fallback). The window
+    /// fallback exists because Terminal/iTerm/Electron apps often don't
+    /// expose the focused text area as a discrete AX element, but the
+    /// containing window itself is reliably reported.
+    func focusedFieldScreenRect() -> CGRect? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+
+        if let focused = accessibilityElement(
+                from: appElement,
+                attribute: kAXFocusedUIElementAttribute as CFString
+           ),
+           let axPoint = accessibilityPoint(from: focused, attribute: kAXPositionAttribute as CFString),
+           let size = accessibilitySize(from: focused, attribute: kAXSizeAttribute as CFString),
+           size.width > 1, size.height > 1 {
+            return flipAXRectToCocoa(CGRect(origin: axPoint, size: size))
+        }
+
+        // Fallback: bottom strip of the focused window. For terminal/REPL/
+        // chat apps the prompt is typically near the bottom; anchoring the
+        // bubble just above that strip puts it near the live input region
+        // without requiring per-app AX support for the text widget itself.
+        if let window = accessibilityElement(
+                from: appElement,
+                attribute: kAXFocusedWindowAttribute as CFString
+           ),
+           let axPoint = accessibilityPoint(from: window, attribute: kAXPositionAttribute as CFString),
+           let size = accessibilitySize(from: window, attribute: kAXSizeAttribute as CFString),
+           size.width > 1, size.height > 1 {
+            let stripHeight: CGFloat = 24
+            let stripAX = CGRect(
+                x: axPoint.x,
+                y: axPoint.y + size.height - stripHeight,
+                width: size.width,
+                height: stripHeight
+            )
+            return flipAXRectToCocoa(stripAX)
+        }
+
+        return nil
+    }
+
+    private func flipAXRectToCocoa(_ axRect: CGRect) -> CGRect {
+        // AX uses top-left origin anchored on the primary display. NSScreen
+        // uses bottom-left origin. Flip with the primary screen's height.
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        return CGRect(
+            x: axRect.origin.x,
+            y: primaryHeight - axRect.origin.y - axRect.size.height,
+            width: axRect.size.width,
+            height: axRect.size.height
+        )
+    }
+
     private func convertImageToDataURL(
         _ image: CGImage,
         mimeType: String,
