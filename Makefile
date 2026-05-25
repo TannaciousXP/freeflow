@@ -25,7 +25,17 @@ ICON_SOURCE = Resources/AppIcon-Source.png
 ICON_ICNS = Resources/AppIcon.icns
 endif
 
-.PHONY: all clean run icon dmg codesign-dmg notarize
+TEST_SOURCES = \
+	Sources/AppName.swift \
+	Sources/CommonWordGuard.swift \
+	Sources/AppContextService.swift \
+	Sources/LLMAPITransport.swift \
+	Sources/CorrectionLearningService.swift \
+	Sources/PostInsertionMonitor.swift \
+	Sources/PostProcessingService.swift \
+	Tests/SelfLearningTests/SelfLearningTests.swift
+
+.PHONY: all clean run icon dmg codesign-dmg notarize test
 
 all: $(APP_EXECUTABLE_TARGET)
 
@@ -124,3 +134,13 @@ clean:
 
 run: all
 	open "$(APP_BUNDLE)"
+
+test:
+	@mkdir -p $(BUILD_DIR)
+	swiftc \
+		-parse-as-library \
+		-o $(BUILD_DIR)/SelfLearningTests \
+		-sdk $(shell xcrun --show-sdk-path) \
+		-target $(ARCH)-apple-macosx13.0 \
+		$(TEST_SOURCES)
+	$(BUILD_DIR)/SelfLearningTests

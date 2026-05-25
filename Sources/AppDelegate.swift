@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -31,8 +32,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if !AXIsProcessTrusted() {
                 appState.showAccessibilityAlert()
             }
+
+            warmUpAudioCaptureIfAuthorized()
+            Task { @MainActor in AudioCrashRecovery.scanAndOfferRecovery(appState: self.appState) }
         }
 
+    }
+
+    private func warmUpAudioCaptureIfAuthorized() {
+        // The first AVCaptureSession.startRunning() of the process can block
+        // for many seconds while CoreAudio negotiates device acquisition,
+        // which causes the user's first hotkey press to drop the trailing
+        // key-up before any buffers flow. Pre-paying that cost here keeps
+        // the first real recording snappy. Gate on authorization so we
+        // never trigger a permission prompt out of context.
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+        AudioRecorder.warmUpDefaultDevice(deviceUID: appState.selectedMicrophoneID)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -174,5 +189,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if !AXIsProcessTrusted() {
             appState.showAccessibilityAlert()
         }
+
+        warmUpAudioCaptureIfAuthorized()
     }
 }

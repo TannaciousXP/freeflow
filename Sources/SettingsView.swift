@@ -274,7 +274,7 @@ struct ProviderSettingsFields: View {
                 Text("Transcription API URL")
                     .font(.caption.weight(.semibold))
                 HStack(spacing: 8) {
-                    TextField("Uses API Base URL when empty", text: $transcriptionAPIURLInput)
+                    TextField(AppState.defaultTranscriptionAPIURL, text: $transcriptionAPIURLInput)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.body, design: .monospaced))
                         .focused($transcriptionAPIURLFocused)
@@ -2723,6 +2723,7 @@ struct VoiceMacroEditorView: View {
 struct LearnedCorrectionsSettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var showingClearConfirmation = false
+    @State private var showingDisclosure = false
 
     var body: some View {
         ScrollView {
@@ -2738,6 +2739,20 @@ struct LearnedCorrectionsSettingsView: View {
         }
         .onAppear {
             appState.refreshLearnedCorrections()
+            if appState.showFirstRunDisclosure {
+                showingDisclosure = true
+                appState.showFirstRunDisclosure = false
+            }
+        }
+        .onChange(of: appState.showFirstRunDisclosure) { newValue in
+            if newValue {
+                showingDisclosure = true
+                appState.showFirstRunDisclosure = false
+            }
+        }
+        .sheet(isPresented: $showingDisclosure) {
+            FirstRunDisclosureView()
+                .environmentObject(appState)
         }
         .confirmationDialog(
             "Clear all learned corrections?",
@@ -2765,6 +2780,13 @@ struct LearnedCorrectionsSettingsView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+            Button("Show explanation") {
+                showingDisclosure = true
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+            .foregroundStyle(Color.accentColor)
+            .padding(.top, 2)
         }
     }
 

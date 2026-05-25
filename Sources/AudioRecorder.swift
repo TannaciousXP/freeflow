@@ -87,6 +87,9 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     private var loggedCaptureFormat = false
     private var fileWriteError: Error?
     private var isSessionInterrupted = false
+    private var inflightPCMURL: URL?
+    private var inflightSidecarURL: URL?
+    private var inflightPCMHandle: FileHandle?
 
     @Published var isRecording = false
     private let _recording = OSAllocatedUnfairLock(initialState: false)
@@ -124,6 +127,11 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     private static let watchdogTimeout: TimeInterval = 2.0
     private static let sampleRateLogLimit = 40
 
+    static func inflightAudioDirectory() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("FreeFlow/audio", isDirectory: true)
+    }
+
     override init() {
         super.init()
         sessionQueue.setSpecific(key: Self.sessionQueueKey, value: 1)
@@ -148,6 +156,116 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
     private static func defaultCaptureDevice() -> AVCaptureDevice? {
         AVCaptureDevice.default(for: .audio) ?? AudioDevice.captureDevices().first
+    }
+
+    private static let warmUpQueue = DispatchQueue(
+        label: "com.zachlatta.freeflow.capture.warmup",
+        qos: .userInitiated
+    )
+    private static let warmUpLock = OSAllocatedUnfairLock(initialState: false)
+
+    // On systems with multiple HAL plug-ins (e.g. ZoomAudioDevice, virtual
+    // routers) or with Continuity Camera registered, the *first*
+    // AVCaptureSession.startRunning() of the process can block for many
+    // seconds while CoreAudio negotiates device acquisition. That stall
+    // freezes the UI long enough for the user to release the dictation
+    // hotkey before any audio buffers flow, and the resulting "0 buffers"
+    // surfaces as a generic capture-session error. Paying the cost once
+    // off the main thread keeps the first real recording snappy.
+    static func warmUpDefaultDevice(deviceUID: String? = nil) {
+        let alreadyWarmed = warmUpLock.withLock { state -> Bool in
+            if state { return true }
+            state = true
+            return false
+        }
+        guard !alreadyWarmed else { return }
+
+        warmUpQueue.async {
+            let device: AVCaptureDevice?
+            if let deviceUID, !deviceUID.isEmpty, deviceUID != "default" {
+                device = captureDevice(forUID: deviceUID) ?? defaultCaptureDevice()
+            } else {
+                device = defaultCaptureDevice()
+            }
+            guard let device else { return }
+
+            let input: AVCaptureDeviceInput
+            do {
+                input = try AVCaptureDeviceInput(device: device)
+            } catch {
+                os_log(.error, log: recordingLog, "warmUp: failed to create input — %{public}@", error.localizedDescription)
+                warmUpLock.withLock { $0 = false }
+                return
+            }
+
+            let session = AVCaptureSession()
+            let output = AVCaptureAudioDataOutput()
+            session.beginConfiguration()
+            if session.canAddInput(input) {
+                session.addInput(input)
+            }
+            if session.canAddOutput(output) {
+                session.addOutput(output)
+            }
+            session.commitConfiguration()
+
+            let t0 = CFAbsoluteTimeGetCurrent()
+            session.startRunning()
+            let elapsed = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+            os_log(.info, log: recordingLog, "warmUp: startRunning took %.1fms (device %{public}@)", elapsed, device.localizedName)
+            if session.isRunning {
+                session.stopRunning()
+            }
+        }
+    }
+
+    private func createInflightFiles() {
+        try? inflightPCMHandle?.close()
+        inflightPCMHandle = nil
+        inflightPCMURL = nil
+        inflightSidecarURL = nil
+
+        let dir = AudioRecorder.inflightAudioDirectory()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let uuid = UUID().uuidString
+        let pcmURL = dir.appendingPathComponent("inflight-\(uuid).pcm")
+        let sidecarURL = dir.appendingPathComponent("inflight-\(uuid).json")
+
+        let meta: [String: Any] = [
+            "sampleRate": recordingTargetFormat.sampleRate,
+            "channels": Int(recordingTargetFormat.channelCount),
+            "bitDepth": 16,
+        ]
+        guard let metaData = try? JSONSerialization.data(withJSONObject: meta) else { return }
+        try? metaData.write(to: sidecarURL)
+
+        FileManager.default.createFile(atPath: pcmURL.path, contents: nil)
+        guard let handle = FileHandle(forWritingAtPath: pcmURL.path) else { return }
+        handle.seekToEndOfFile()
+
+        inflightPCMURL = pcmURL
+        inflightSidecarURL = sidecarURL
+        inflightPCMHandle = handle
+    }
+
+    private func appendToInflightIfNeeded(_ buffer: AVAudioPCMBuffer) {
+        guard let handle = inflightPCMHandle,
+              buffer.frameLength > 0,
+              let ptr = buffer.int16ChannelData?[0] else { return }
+        let data = Data(bytes: ptr, count: Int(buffer.frameLength) * MemoryLayout<Int16>.size)
+        try? handle.write(contentsOf: data)
+    }
+
+    private func deleteInflightFiles() {
+        if let url = inflightPCMURL {
+            try? FileManager.default.removeItem(at: url)
+            inflightPCMURL = nil
+        }
+        if let url = inflightSidecarURL {
+            try? FileManager.default.removeItem(at: url)
+            inflightSidecarURL = nil
+        }
     }
 
     private func preferredCaptureDevice(
@@ -192,7 +310,19 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             queue: nil
         ) { [weak self] notification in
             let error = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError
-            let wrapped = error.map { AudioRecorderError.failedToStartCaptureSession($0.localizedDescription) }
+            if let error {
+                os_log(
+                    .error,
+                    log: recordingLog,
+                    "runtime error notification — domain=%{public}@ code=%ld userInfo=%{public}@",
+                    error.domain,
+                    error.code,
+                    String(describing: error.userInfo)
+                )
+            } else {
+                os_log(.error, log: recordingLog, "runtime error notification with no NSError payload")
+            }
+            let wrapped = error.map { AudioRecorderError.failedToStartCaptureSession("\($0.localizedDescription) [\($0.domain):\($0.code)]") }
                 ?? AudioRecorderError.failedToStartCaptureSession("Unknown runtime error")
             self?.reportRecordingFailure(wrapped)
         }
@@ -305,6 +435,8 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             }
             self.activeAudioFile = nil
             self.activeAudioFormat = nil
+            try? self.inflightPCMHandle?.close()
+            self.inflightPCMHandle = nil
         }
 
         defer {
@@ -402,6 +534,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         if sourceFormat == targetFormat {
             try activeAudioFile.write(from: inputBuffer)
             recordedFrameCount += AVAudioFramePosition(inputBuffer.frameLength)
+            appendToInflightIfNeeded(inputBuffer)
             return
         }
 
@@ -413,6 +546,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         guard outputBuffer.frameLength > 0 else { return }
         try activeAudioFile.write(from: outputBuffer)
         recordedFrameCount += AVAudioFramePosition(outputBuffer.frameLength)
+        appendToInflightIfNeeded(outputBuffer)
     }
 
     private func validatedPCMBufferFormat(
@@ -571,15 +705,12 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
         let session = AVCaptureSession()
         let dataOutput = AVCaptureAudioDataOutput()
-        dataOutput.audioSettings = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: recordingTargetFormat.sampleRate,
-            AVNumberOfChannelsKey: Int(recordingTargetFormat.channelCount),
-            AVLinearPCMBitDepthKey: bitDepth(for: recordingTargetFormat.commonFormat),
-            AVLinearPCMIsFloatKey: isFloatFormat(recordingTargetFormat.commonFormat),
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: !recordingTargetFormat.isInterleaved,
-        ]
+        // Don't force a specific audioSettings dictionary — on macOS 26.5
+        // explicit settings like 16 kHz mono Int16 cause the capture session
+        // to throw NSOSStatusErrorDomain -67440 immediately after startRunning.
+        // The downstream `appendSampleBufferToFile` path already converts
+        // arbitrary device-native formats (typically 48 kHz Float32) to the
+        // 16 kHz Int16 target via AVAudioConverter, so device-native is safe.
         dataOutput.setSampleBufferDelegate(self, queue: sampleBufferQueue)
 
         let input: AVCaptureDeviceInput
@@ -634,6 +765,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
         os_log(.info, log: recordingLog, "capture session running with device %{public}@ [uid=%{public}@]", device.localizedName, device.uniqueID)
         tempFileURL = outputURL
+        createInflightFiles()
     }
 
     func startRecording(deviceUID: String? = nil) throws {
@@ -702,6 +834,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             if let discardURL {
                 try? FileManager.default.removeItem(at: discardURL)
             }
+            self.deleteInflightFiles()
             DispatchQueue.main.async {
                 self.isRecording = false
                 self.audioLevel = 0.0
@@ -715,6 +848,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
                 try? FileManager.default.removeItem(at: url)
                 self.tempFileURL = nil
             }
+            self.deleteInflightFiles()
         }
 
         if DispatchQueue.getSpecific(key: Self.sessionQueueKey) != nil {

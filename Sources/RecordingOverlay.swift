@@ -9,6 +9,13 @@ final class RecordingOverlayState: ObservableObject {
     @Published var recordingTriggerMode: RecordingTriggerMode = .hold
     @Published var isCommandMode = false
     @Published var updateVersion: String = ""
+    // Live transcript shown in the SpeechBubble overlay when realtime
+    // streaming is active. Independent of `phase` so the bubble can stay
+    // anchored to the focused field while the notch overlay does its own
+    // initializing → recording → transcribing transitions.
+    @Published var liveTranscript: String = ""
+    /// Text shown in the transient "just learned" toast pill.
+    @Published var learnedToastText: String = ""
 }
 
 enum OverlayPhase {
@@ -17,6 +24,8 @@ enum OverlayPhase {
     case transcribing
     case feedback
     case updateAvailable
+    /// Transient 3-second toast confirming a correction was learned.
+    case learnedToast
 }
 
 // MARK: - Panel Helpers
@@ -60,11 +69,14 @@ private func makeNotchContent<V: View>(
 
 final class RecordingOverlayManager {
     private var overlayWindow: NSPanel?
+    private var bubbleWindow: NSPanel?
     private let overlayState = RecordingOverlayState()
     private var lockedOverlayWidth: CGFloat?
+    private static let bubbleSize = CGSize(width: 360, height: 80)
 
     var onStopButtonPressed: (() -> Void)?
     var onUpdateOverlayPressed: (() -> Void)?
+    private var toastDismissWorkItem: DispatchWorkItem?
 
     private var screenHasNotch: Bool {
         guard let screen = NSScreen.main else { return false }
@@ -270,7 +282,7 @@ final class RecordingOverlayManager {
         switch overlayState.phase {
         case .recording, .initializing, .transcribing, .feedback:
             return true
-        case .updateAvailable:
+        case .updateAvailable, .learnedToast:
             return false
         }
     }
@@ -329,6 +341,12 @@ final class RecordingOverlayManager {
             return max(notchWidth, updateWidth)
         }
 
+        if overlayState.phase == .learnedToast {
+            let toastWidth: CGFloat = 220
+            guard screenHasNotch else { return toastWidth }
+            return max(notchWidth, toastWidth)
+        }
+
         let commandModeWidth: CGFloat = 180
         let toggleWidth: CGFloat = 150
         let defaultWidth: CGFloat = 92
@@ -360,6 +378,84 @@ final class RecordingOverlayManager {
             panel.orderOut(nil)
             overlayWindow = nil
         }
+        hideBubble()
+    }
+
+    // MARK: - Speech Bubble (anchored to focused field)
+
+    /// Show the speech bubble near `rect` (focused-field rect in screen
+    /// coords, bottom-left origin). Independent panel from the notch
+    /// overlay so they don't compete for the single `overlayWindow` slot.
+    func showBubble(near rect: CGRect) {
+        DispatchQueue.main.async {
+            self.overlayState.liveTranscript = ""
+            self.ensureBubblePanel()
+            self.repositionBubble(near: rect)
+            self.bubbleWindow?.orderFrontRegardless()
+        }
+    }
+
+    /// Push streaming partials into the bubble. Cheap — just updates
+    /// the @Published value, SwiftUI rerenders.
+    func updateLiveTranscript(_ text: String) {
+        DispatchQueue.main.async {
+            self.overlayState.liveTranscript = text
+        }
+    }
+
+    func hideBubble() {
+        DispatchQueue.main.async {
+            self.overlayState.liveTranscript = ""
+            self.bubbleWindow?.orderOut(nil)
+            self.bubbleWindow = nil
+        }
+    }
+
+    /// Shows a transient toast pill ("Learned: X → Y") for 3 seconds.
+    /// No-ops if the overlay is already in active use for recording/transcription.
+    func showLearnedToast(original: String, corrected: String) {
+        DispatchQueue.main.async {
+            // Don't disrupt an active recording or transcription session.
+            guard self.overlayWindow == nil else { return }
+            self.toastDismissWorkItem?.cancel()
+            self.overlayState.learnedToastText = "Learned: \(original) → \(corrected)"
+            self.overlayState.phase = .learnedToast
+            self.showOverlayPanel(animatedResize: false)
+            let work = DispatchWorkItem { [weak self] in self?.dismiss() }
+            self.toastDismissWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
+        }
+    }
+
+    private func ensureBubblePanel() {
+        if bubbleWindow != nil { return }
+        let panel = makeOverlayPanel(width: Self.bubbleSize.width, height: Self.bubbleSize.height)
+        panel.contentView = NSHostingView(
+            rootView: SpeechBubbleView().environmentObject(overlayState)
+        )
+        bubbleWindow = panel
+    }
+
+    private func repositionBubble(near rect: CGRect) {
+        guard let panel = bubbleWindow else { return }
+        let size = Self.bubbleSize
+        // Pick the screen containing the field so multi-display setups work.
+        let containingScreen = NSScreen.screens.first(where: { $0.frame.intersects(rect) })
+            ?? NSScreen.main
+        let visible = containingScreen?.visibleFrame ?? .zero
+
+        // Default: above the field with a 6pt gap, horizontally centered on it.
+        var origin = CGPoint(
+            x: rect.midX - size.width / 2,
+            y: rect.maxY + 6
+        )
+        // Flip below if it'd run off the top of the visible area.
+        if origin.y + size.height > visible.maxY {
+            origin.y = rect.minY - size.height - 6
+        }
+        // Clamp horizontally so it doesn't get cut off at the screen edge.
+        origin.x = max(visible.minX + 6, min(visible.maxX - size.width - 6, origin.x))
+        panel.setFrame(CGRect(origin: origin, size: size), display: true)
     }
 }
 
@@ -475,7 +571,7 @@ struct WaveformBar: View {
 
     var body: some View {
         Capsule()
-            .fill(.white)
+            .fill(.yellow)
             .frame(width: 3, height: minHeight + (maxHeight - minHeight) * amplitude)
     }
 }
@@ -598,7 +694,7 @@ struct CompactWaveformBar: View {
 
     var body: some View {
         Capsule()
-            .fill(.white)
+            .fill(.yellow)
             .frame(width: 2, height: minHeight + (maxHeight - minHeight) * amplitude)
     }
 }
@@ -852,6 +948,9 @@ struct RecordingOverlayView: View {
                 FailureIndicatorView()
             } else if state.phase == .updateAvailable {
                 UpdateAvailableOverlayView(onPress: onUpdateOverlayPressed)
+            } else if state.phase == .learnedToast {
+                LearnedToastView(text: state.learnedToastText)
+                    .transition(.opacity)
             } else {
                 ZStack {
                     Group {
@@ -930,6 +1029,21 @@ struct FailureIndicatorView: View {
     }
 }
 
+// MARK: - Learned Toast View
+
+/// Transient pill shown for ~3 s after a correction is learned.
+struct LearnedToastView: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium, design: .rounded))
+            .foregroundStyle(.white.opacity(0.88))
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 struct UpdateAvailableOverlayView: View {
     let onPress: () -> Void
 
@@ -948,5 +1062,45 @@ struct UpdateAvailableOverlayView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Speech Bubble
+
+/// Floating bubble anchored near the focused input field. Renders the
+/// streaming partial transcript in yellow so it reads as "this is what I'm
+/// hearing right now" without competing visually with the user's own typing.
+struct SpeechBubbleView: View {
+    @EnvironmentObject var state: RecordingOverlayState
+
+    private var displayText: String {
+        state.liveTranscript.isEmpty ? "Listening…" : state.liveTranscript
+    }
+
+    private var textColor: Color {
+        state.liveTranscript.isEmpty ? Color.yellow.opacity(0.55) : Color.yellow
+    }
+
+    var body: some View {
+        Text(displayText)
+            .font(.system(size: 14, weight: .medium, design: .rounded))
+            .foregroundStyle(textColor)
+            .multilineTextAlignment(.leading)
+            .lineLimit(3)
+            .truncationMode(.head)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.black.opacity(0.85))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.yellow.opacity(0.35), lineWidth: 1)
+                    )
+            )
+            .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+            .padding(4)
+            .animation(.easeOut(duration: 0.12), value: state.liveTranscript)
     }
 }

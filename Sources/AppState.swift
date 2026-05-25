@@ -242,7 +242,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     let maxPipelineHistoryCount = 20
     static let defaultContextScreenshotMaxDimension = Int(AppContextService.defaultScreenshotMaxDimension)
     static let contextScreenshotDimensionOptions = [1024, 768, 640, 512]
-    static let defaultTranscriptionModel = "whisper-large-v3"
+    static let defaultTranscriptionModel = "whisper-1"
     static let transcriptionLanguageOptions: [(code: String, name: String)] = [
         ("", "Auto-detect"),
         ("en", "English"),
@@ -275,9 +275,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         ("hu", "Hungarian"),
         ("ca", "Catalan")
     ]
-    static let defaultPostProcessingModel = "openai/gpt-oss-20b"
-    static let defaultPostProcessingFallbackModel = "meta-llama/llama-4-scout-17b-16e-instruct"
-    static let defaultContextModel = "meta-llama/llama-4-scout-17b-16e-instruct"
+    static let defaultPostProcessingModel = "openai/gpt-4o-mini"
+    static let defaultPostProcessingFallbackModel = "anthropic/claude-3.5-haiku"
+    static let defaultContextModel = "openai/gpt-4o-mini"
     private static let trailingPressEnterCommandPattern = try! NSRegularExpression(
         pattern: #"(?i)(?:^|[ \t\r\n,;:\-]+)press[ \t\r\n]+enter[\s\p{P}]*$"#
     )
@@ -549,6 +549,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
     private let selfLearningEnabledStorageKey = "self_learning_enabled"
+    /// Set to the most-recently learned correction for downstream subscribers.
+    @Published var lastLearnedToast: (original: String, corrected: String)?
+    /// Set to true after a successful dictation when the first-run disclosure hasn't been shown yet.
+    @Published var showFirstRunDisclosure: Bool = false
+    private var learnedCorrectionObserver: NSObjectProtocol?
     @Published var pipelineHistory: [PipelineHistoryItem] = []
     @Published var debugStatusMessage = "Idle"
     @Published var debugShowsUpdateReminderAfterDictation = false
@@ -799,6 +804,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
         ) as? Bool
         self.isSelfLearningEnabled = persistedSelfLearning ?? true
         self.learnedCorrections = correctionLearningService.allCorrections()
+
+        // Observe freeflow.didLearnCorrection posted by CorrectionLearningService.
+        // TODO uxPolish: depends on learningEvolution posting freeflow.didLearnCorrection
+        learnedCorrectionObserver = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("freeflow.didLearnCorrection"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let original = notification.userInfo?["original"] as? String,
+                  let corrected = notification.userInfo?["corrected"] as? String else { return }
+            self.lastLearnedToast = (original, corrected)
+            self.overlayManager.showLearnedToast(original: original, corrected: corrected)
+        }
     }
 
     func refreshLearnedCorrections() {
@@ -844,7 +863,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    static let defaultAPIBaseURL = "https://api.groq.com/openai/v1"
+    static let defaultAPIBaseURL = "https://openrouter.ai/api/v1"
+    static let defaultTranscriptionAPIURL = "https://api.openai.com/v1"
 
     private struct StoredShortcutConfiguration {
         let hold: ShortcutBinding
@@ -995,7 +1015,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private var resolvedTranscriptionBaseURL: String {
         let trimmed = transcriptionAPIURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? apiBaseURL : trimmed
+        if !trimmed.isEmpty { return trimmed }
+        // OpenRouter (the default primary) doesn't expose Whisper. When the
+        // user hasn't set a transcription override and the primary is the
+        // default OpenRouter URL, route transcription to the OpenAI Whisper
+        // endpoint. Otherwise fall back to the primary so any user-chosen
+        // transcription-capable provider keeps working.
+        if apiBaseURL == Self.defaultAPIBaseURL {
+            return Self.defaultTranscriptionAPIURL
+        }
+        return apiBaseURL
     }
 
     private var resolvedTranscriptionAPIKey: String {
@@ -1010,6 +1039,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
             transcriptionModel: transcriptionModel,
             language: resolvedTranscriptionLanguage
         )
+    }
+
+    func transcribeRecoveredAudio(url: URL) {
+        guard !isRecording, !isTranscribing else { try? FileManager.default.removeItem(at: url); return }
+        isTranscribing = true
+        transcriptionTask = Task { [weak self] in
+            defer { try? FileManager.default.removeItem(at: url) }
+            guard let self else { return }
+            if let raw = try? await self.makeTranscriptionService().transcribe(fileURL: url) {
+                await MainActor.run { self.isTranscribing = false; self.transcriptionTask = nil; _ = self.writeTranscriptToPasteboard(raw); self.pasteAtCursorWhenShortcutReleased() }
+            } else {
+                await MainActor.run { self.isTranscribing = false; self.transcriptionTask = nil }
+            }
+        }
     }
 
     private var resolvedTranscriptionLanguage: String? {
@@ -2192,6 +2235,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         startRealtimeStreamingIfEnabled()
 
+        // Anchor the live-transcript speech bubble to the focused field
+        // (falls back to the window's bottom strip, then to screen-center
+        // if AX returns nothing at all). The bubble shows "Listening…"
+        // until realtime partials arrive, then turns bright yellow.
+        let bubbleAnchor = contextService.focusedFieldScreenRect()
+            ?? screenCenterBubbleAnchor()
+        overlayManager.showBubble(near: bubbleAnchor)
+
         // Start engine on background thread so UI isn't blocked
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -2659,6 +2710,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             }
                         } else {
                             self.statusText = completionStatusText
+                            if FirstRunDisclosure.shouldShow(appState: self) {
+                                self.selectedSettingsTab = .learnedCorrections
+                                self.showFirstRunDisclosure = true
+                                NotificationCenter.default.post(name: .showSettings, object: nil)
+                            }
                             if shouldPersistRawDictationFallback {
                                 self.scheduleOverlayDismissAfterFailureIndicator(after: 2.5)
                             } else {
@@ -2811,12 +2867,27 @@ final class AppState: ObservableObject, @unchecked Sendable {
         audioRecorder.onPCM16Samples = { [weak service] data in
             service?.appendPCM16(data)
         }
+        // Feed streaming partials into the speech bubble. The overlay
+        // manager hops to main internally — onPartialUpdate is called
+        // from the realtime service's task context.
+        service.onPartialUpdate = { [weak self] text in
+            self?.overlayManager.updateLiveTranscript(text)
+        }
     }
 
     private func tearDownRealtimeService() {
         audioRecorder.onPCM16Samples = nil
         realtimeService?.cancel()
         realtimeService = nil
+    }
+
+    /// Last-resort anchor for the speech bubble when AX returns nothing
+    /// for the frontmost app. Places a 1pt-tall rect centered horizontally
+    /// in the visible area, well below the menu bar, so the bubble lands
+    /// in the middle of the screen rather than getting clamped to an edge.
+    private func screenCenterBubbleAnchor() -> CGRect {
+        let visible = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+        return CGRect(x: visible.midX, y: visible.midY, width: 1, height: 1)
     }
 
     private func startContextCapture() {

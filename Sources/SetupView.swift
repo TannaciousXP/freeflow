@@ -6,6 +6,7 @@ import ServiceManagement
 
 private struct SetupProviderSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject var appState: AppState
     @Binding var apiBaseURLInput: String
     @Binding var transcriptionAPIURLInput: String
     @Binding var transcriptionAPIKeyInput: String
@@ -40,6 +41,7 @@ private struct SetupProviderSettingsSheet: View {
             HStack {
                 Spacer()
                 Button("Done") {
+                    commitSheetInputs()
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -47,6 +49,33 @@ private struct SetupProviderSettingsSheet: View {
             .padding(16)
         }
         .frame(width: 560, height: 520)
+        .onDisappear { commitSheetInputs() }
+    }
+
+    // ProviderSettingsFields commits on focus-loss, but SwiftUI's sheet
+    // dismissal can race with focus changes — the user clicks Done while
+    // a SecureField still owns focus, the sheet tears down before .onChange
+    // fires, and the typed key is lost. Force-commit here on every dismissal
+    // path so the values always reach appState.
+    private func commitSheetInputs() {
+        let trimmedBase = apiBaseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        apiBaseURLInput = trimmedBase
+        let resolvedBase = trimmedBase.isEmpty ? AppState.defaultAPIBaseURL : trimmedBase
+        if appState.apiBaseURL != resolvedBase {
+            appState.apiBaseURL = resolvedBase
+        }
+
+        let trimmedTransURL = transcriptionAPIURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        transcriptionAPIURLInput = trimmedTransURL
+        if appState.transcriptionAPIURL != trimmedTransURL {
+            appState.transcriptionAPIURL = trimmedTransURL
+        }
+
+        let trimmedTransKey = transcriptionAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        transcriptionAPIKeyInput = trimmedTransKey
+        if appState.transcriptionAPIKey != trimmedTransKey {
+            appState.transcriptionAPIKey = trimmedTransKey
+        }
     }
 }
 
@@ -958,6 +987,13 @@ struct SetupView: View {
                             .font(.title2)
                             .fontWeight(.semibold)
                             .foregroundStyle(.blue)
+
+                        Text("Keep holding — the first capture can take up to 15 seconds while macOS warms up the microphone. Don't release until you've said your sentence.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                            .padding(.top, 4)
                     }
 
                 case .transcribing:
@@ -1221,43 +1257,57 @@ struct SetupView: View {
         testHotkeyHarness.onAction = { action in
             switch action {
             case .start:
-                guard testPhase == .idle || testPhase == .done else { return }
+                // Hotkey harness re-dispatches `.start` on every key-repeat
+                // event while the user holds the trigger. The previous
+                // synchronous startRecording() implicitly serialized this by
+                // blocking the main thread; now that startRecording runs
+                // off-thread we have to reject re-entries explicitly or we
+                // stack a fresh AVCaptureSession per repeat tick.
+                guard testPhase == .idle || testPhase == .done,
+                      testAudioRecorder == nil else { return }
                 if testPhase == .done {
                     resetTest()
                 }
-                do {
-                    let recorder = AudioRecorder()
-                    recorder.onRecordingFailure = { [weak recorder] error in
-                        guard let recorder else { return }
-                        Task { @MainActor in
-                            testAudioLevelCancellable?.cancel()
-                            testAudioLevelCancellable = nil
-                            testAudioLevel = 0.0
-                            testHotkeyHarness.isTranscribing = false
-                            testAudioRecorder = nil
-                            testError = error.localizedDescription
-                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                                testPhase = .done
-                            }
-                            recorder.cleanup()
+                let recorder = AudioRecorder()
+                recorder.onRecordingFailure = { [weak recorder] error in
+                    guard let recorder else { return }
+                    Task { @MainActor in
+                        testAudioLevelCancellable?.cancel()
+                        testAudioLevelCancellable = nil
+                        testAudioLevel = 0.0
+                        testHotkeyHarness.isTranscribing = false
+                        testHotkeyHarness.resetSession()
+                        testAudioRecorder = nil
+                        testError = error.localizedDescription
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                            testPhase = .done
                         }
+                        recorder.cleanup()
                     }
-                    try recorder.startRecording(deviceUID: appState.selectedMicrophoneID)
-                    testAudioRecorder = recorder
-                    testError = nil
-                    testAudioLevelCancellable = recorder.$audioLevel
-                        .receive(on: DispatchQueue.main)
-                        .sink { level in
-                            testAudioLevel = level
-                        }
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                        testPhase = .recording
+                }
+                testAudioRecorder = recorder
+                testError = nil
+                testAudioLevelCancellable = recorder.$audioLevel
+                    .receive(on: DispatchQueue.main)
+                    .sink { level in
+                        testAudioLevel = level
                     }
-                } catch {
-                    testHotkeyHarness.resetSession()
-                    testError = error.localizedDescription
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                        testPhase = .done
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                    testPhase = .recording
+                }
+                // AVCaptureSession.startRunning() can block for many seconds
+                // on first acquisition (cold CoreAudio HAL, stacked virtual
+                // audio drivers, Continuity Camera in the device list).
+                // Dispatching off the main thread keeps the UI responsive
+                // so the user's hotkey-release event isn't swallowed,
+                // and routes any failure through the same onRecordingFailure
+                // path the running session uses.
+                let selectedDeviceUID = appState.selectedMicrophoneID
+                Task.detached(priority: .userInitiated) {
+                    do {
+                        try recorder.startRecording(deviceUID: selectedDeviceUID)
+                    } catch {
+                        recorder.onRecordingFailure?(error)
                     }
                 }
 
