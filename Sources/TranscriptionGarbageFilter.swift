@@ -6,154 +6,177 @@ import Foundation
 /// returns Whisper `segments`/`no_speech_prob` metadata — which Groq and OpenAI
 /// cloud responses routinely omit, so it silently no-ops on the default cloud
 /// providers. This filter is **additive** and works on the transcript text (plus
-/// an optional audio duration) alone, so it catches garbage regardless of what
-/// metadata the provider supplied.
+/// the audio duration) alone, so it catches garbage regardless of what metadata
+/// the provider supplied.
 ///
-/// Idea-ported from LocalFlow's `_is_likely_garbage`. Conservative by design:
-/// **false positives (dropping real user dictation) are the cardinal sin**, so
-/// ambiguous signals (ellipsis, comma-fragmentation, mild word-rate mismatch)
-/// must combine — 2+ are required to flag. Only unambiguous markers (explicit
-/// blank-audio tokens) and *extreme* word/char-rate mismatch may flag alone.
+/// Idea-ported from LocalFlow's `_is_likely_garbage`, but tightened around one
+/// rule: **dropping real user dictation is unacceptable.** We favor recall of
+/// real speech over catching every piece of garbage. The filter is therefore
+/// CONTENT-ANCHORED:
+///
+/// - A **content signal** implies there was no real speech at all — the
+///   transcript IS a blank-audio token, it is entirely non-alphabetic, or it is
+///   pure ellipsis fragmentation. Real speech always contains real words, so a
+///   content signal is safe to act on alone.
+/// - **Weak signals** (audio-duration / words-per-second mismatch, heavy
+///   comma-fragmentation) overlap with legitimate short or slow speech and real
+///   lists, so they may ONLY ever *combine with* a content signal. They can
+///   never, on their own or together, drop a transcript that contains real
+///   words.
+///
+/// Net effect: we flag iff a content signal is present. Because no real-word
+/// transcript can carry a content signal, the worst case is "some garbage slips
+/// through", never "real dictation dropped". When in doubt, don't flag.
+///
+/// `durationSeconds` is accepted (the production path always has it) so the
+/// signature is ready to combine a duration/word-rate signal with a content
+/// signal in future tuning, but it currently never causes a drop on its own —
+/// duration- and comma-based signals overlap with real short/slow speech and
+/// real lists, which is exactly the false-positive class we refuse to risk.
 enum TranscriptionGarbageFilter {
 
-    // CJK detection threshold: if at least this fraction of the non-whitespace,
-    // non-punctuation characters are CJK, switch from word-count to char-count
-    // (CJK has no word spacing, so `.split()` massively undercounts and would
-    // produce false-positive "too few words" flags on legitimate CJK speech).
-    private static let cjkDensityThreshold = 0.3
-
-    // Duration below which the content/duration mismatch check is skipped — a
-    // short clip with a short transcript is normal ("yes", "no problem").
-    private static let durationMismatchMinSeconds = 3.0
-
     /// Returns true when `text` looks like transcription garbage and should be
-    /// dropped. `durationSeconds` is the recorded audio length, if known; when
-    /// nil, the content/duration mismatch signal is simply not evaluated (the
-    /// text-only signals still apply).
+    /// dropped. A content signal (blank-audio token, no alphabetic content, or
+    /// pure ellipsis fragmentation) is always required; `durationSeconds` never
+    /// causes a drop on its own.
     static func isLikelyGarbage(text: String, durationSeconds: Double?) -> Bool {
+        _ = durationSeconds // reserved for future content-gated combination; see doc comment
         let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return false }
 
-        var signals = 0
-        let rawLower = raw.lowercased()
+        // ── Content signals (any one implies NO real speech → safe to flag) ──
 
-        // Signal 1: Ellipsis — Whisper's uncertainty/trailing-off marker.
-        // Matches both the ASCII "..." and the Unicode ellipsis "…".
-        if raw.contains("...") || raw.contains("\u{2026}") {
-            signals += 1
-        }
-
-        // Signal 2 (UNAMBIGUOUS, flags alone): explicit blank-audio / silence
-        // markers and hallucinated interjections leaking through from the model.
-        let blankAudioTokens = ["[blank_audio]", "(silence)", "[silence]", "(pause)", "(speaking)"]
-        if blankAudioTokens.contains(where: { rawLower.contains($0) }) {
+        // C1: the entire transcript is a blank-audio / silence marker. Matched as
+        // the WHOLE transcript (or a lone bracketed/parenthesized token), never as
+        // a substring — so real dictation that merely contains the word "pause" or
+        // a literal "(pause)" aside is not dropped.
+        if isBlankAudioToken(raw) {
             return true
         }
-        let interjectionTokens = ["oop,", "oop ", "uh-oh"]
-        if interjectionTokens.contains(where: { rawLower.contains($0) }) {
-            signals += 1
+
+        // C2: the transcript contains no alphabetic content at all — only
+        // punctuation, ellipsis, symbols, digits and whitespace. Real speech
+        // always transcribes to letters in some script, so this is garbage.
+        if !containsAlphabeticContent(raw) {
+            return true
         }
 
-        // Signal 3: Heavy comma-fragmentation — 3+ comma-separated chunks where
-        // every chunk is short (<= 3 words). Catches "uh, no, so, by, the path"
-        // while leaving real lists ("eggs, milk, and bread" → only 3 chunks but
-        // the trailing chunk "and bread" is fine; the all-short test is what
-        // distinguishes spam from a real list whose chunks carry real content).
-        let chunks = raw
-            .split(separator: ",", omittingEmptySubsequences: true)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        if chunks.count >= 3 && chunks.allSatisfy({ wordCount($0) <= 3 }) {
-            signals += 1
+        // C3: pure ellipsis fragmentation — the transcript is dominated by
+        // ellipsis runs with almost no real words. "I think... maybe Friday
+        // works." (one ellipsis, real words) is NOT this; "..., ..., um..., ..."
+        // is. Requires a content signal's worth of evidence to stand alone.
+        if isPureEllipsisFragmentation(raw) {
+            return true
         }
 
-        // Signal 4: Content/duration mismatch. Only evaluated when we know the
-        // duration AND it exceeds the minimum (short clips are exempt).
-        if let duration = durationSeconds, duration > durationMismatchMinSeconds {
-            if isCJKText(raw) {
-                // CJK char-density. Normal CJK speech is ~5-8 chars/sec.
-                let nonSpaceChars = raw.reduce(0) { $1.isWhitespace ? $0 : $0 + 1 }
-                let cps = Double(nonSpaceChars) / duration
-                if cps < 1.0 {
-                    return true // extreme — flag alone
-                }
-                if cps < 2.0 {
-                    signals += 1
-                }
-            } else if !isSpacelessScriptText(raw) {
-                // Whitespace-segmented scripts (Latin, Cyrillic, Greek, Arabic,
-                // etc.). Normal speech is ~2-3 words/sec.
-                //
-                // NOTE: spaceless non-CJK scripts (Thai, Lao, Khmer, Myanmar)
-                // are deliberately excluded — `.split()` undercounts them to ~1
-                // token, which would falsely trip wps<0.4 on legit long speech.
-                // Their normal char rates aren't tuned here, so we skip the
-                // duration-mismatch signal entirely for them (text-only signals
-                // still apply). Dropping real dictation is the cardinal sin.
-                let wps = Double(wordCount(raw)) / duration
-                if wps < 0.4 {
-                    return true // extreme — Whisper basically gave up; flag alone
-                }
-                if wps < 0.8 {
-                    signals += 1
-                }
-            }
-        }
-
-        // Conservative: require 2+ independent ambiguous signals to flag.
-        return signals >= 2
+        // ── No content signal → keep the transcript. ──
+        //
+        // Every transcript that reaches this point contains real words. Weak
+        // signals (comma-fragmentation, word/char-rate mismatch) overlap with
+        // real short/slow speech and real lists, so they are deliberately NOT
+        // consulted here: dropping real dictation is the cardinal sin.
+        return false
     }
 
-    /// Count of whitespace-delimited tokens in `text`.
-    private static func wordCount(_ text: String) -> Int {
-        text.split(whereSeparator: { $0.isWhitespace }).count
-    }
+    // MARK: - Content signals
 
-    /// True if a significant fraction of `text` is CJK (Chinese / Japanese /
-    /// Korean). Used to switch garbage detection from word-count to char-count,
-    /// since CJK languages have no word spacing.
-    private static func isCJKText(_ text: String) -> Bool {
-        var cjkChars = 0
-        var totalChars = 0
-        for scalar in text.unicodeScalars {
-            let ch = Character(scalar)
-            if ch.isWhitespace || ch.isPunctuation || ch.isSymbol {
-                continue
-            }
-            totalChars += 1
-            let cp = scalar.value
-            if (0x3040...0x309F).contains(cp) ||   // Hiragana
-               (0x30A0...0x30FF).contains(cp) ||   // Katakana
-               (0x4E00...0x9FFF).contains(cp) ||   // CJK Unified Ideographs
-               (0xAC00...0xD7AF).contains(cp) {     // Hangul Syllables
-                cjkChars += 1
+    /// True when the whole trimmed transcript is a single blank-audio / silence
+    /// marker (optionally wrapped in `[...]` or `(...)`). Whole-string match only.
+    private static func isBlankAudioToken(_ raw: String) -> Bool {
+        let lower = raw.lowercased()
+
+        // Exact whole-transcript markers.
+        let exactMarkers: Set<String> = [
+            "[blank_audio]", "(blank_audio)", "blank_audio",
+            "[silence]", "(silence)", "silence",
+            "[pause]", "(pause)",
+            "[speaking]", "(speaking)",
+            "[no speech]", "(no speech)",
+            "[inaudible]", "(inaudible)",
+            "[music]", "(music)",
+        ]
+        if exactMarkers.contains(lower) {
+            return true
+        }
+
+        // A lone bracketed/parenthesized token whose inner text is a known marker
+        // word (covers underscore/space variants like "[blank audio]").
+        if let inner = bracketedInner(lower) {
+            let normalizedInner = inner.replacingOccurrences(of: "_", with: " ")
+                .trimmingCharacters(in: .whitespaces)
+            let markerWords: Set<String> = [
+                "blank audio", "silence", "pause", "speaking",
+                "no speech", "inaudible", "music",
+            ]
+            if markerWords.contains(normalizedInner) {
+                return true
             }
         }
-        return totalChars > 0 && (Double(cjkChars) / Double(totalChars)) >= cjkDensityThreshold
+        return false
     }
 
-    /// True if a significant fraction of `text` is from a script that does not
-    /// use whitespace to separate words (Thai, Lao, Khmer, Myanmar). These would
-    /// be undercounted by `.split()` just like CJK, but their normal char rates
-    /// differ, so the caller skips the duration-mismatch signal for them rather
-    /// than risk a false positive on legitimate long speech.
-    private static func isSpacelessScriptText(_ text: String) -> Bool {
-        var spacelessChars = 0
-        var totalChars = 0
-        for scalar in text.unicodeScalars {
-            let ch = Character(scalar)
-            if ch.isWhitespace || ch.isPunctuation || ch.isSymbol {
-                continue
-            }
-            totalChars += 1
-            let cp = scalar.value
-            if (0x0E00...0x0E7F).contains(cp) ||   // Thai
-               (0x0E80...0x0EFF).contains(cp) ||   // Lao
-               (0x1780...0x17FF).contains(cp) ||   // Khmer
-               (0x1000...0x109F).contains(cp) {     // Myanmar
-                spacelessChars += 1
+    /// If `raw` is a single fully-bracketed/parenthesized token (e.g. "[x]" or
+    /// "(x)") with no other content, return the inner text; otherwise nil.
+    private static func bracketedInner(_ raw: String) -> String? {
+        guard let first = raw.first, let last = raw.last else { return nil }
+        let pairs: [(Character, Character)] = [("[", "]"), ("(", ")"), ("{", "}")]
+        for (open, close) in pairs where first == open && last == close {
+            let inner = String(raw.dropFirst().dropLast())
+            // Reject if the inner text itself contains another bracket of the
+            // same kind, i.e. this wasn't a single clean wrapper.
+            if !inner.contains(open) && !inner.contains(close) {
+                return inner
             }
         }
-        return totalChars > 0 && (Double(spacelessChars) / Double(totalChars)) >= cjkDensityThreshold
+        return nil
     }
+
+    /// True if the transcript contains at least one alphabetic character in ANY
+    /// script (Latin, CJK, Thai, Cyrillic, …). If it contains none, it is pure
+    /// punctuation/symbols/digits and carries no real speech.
+    private static func containsAlphabeticContent(_ raw: String) -> Bool {
+        for scalar in raw.unicodeScalars where Character(scalar).isLetter {
+            return true
+        }
+        return false
+    }
+
+    /// True when the transcript is overwhelmingly ellipsis with almost no real
+    /// words — pure trailing-off junk. Conservative: needs multiple ellipsis runs
+    /// AND very little alphabetic content so genuine hesitation ("I think...")
+    /// never qualifies.
+    private static func isPureEllipsisFragmentation(_ raw: String) -> Bool {
+        let ellipsisRuns = countEllipsisRuns(raw)
+        guard ellipsisRuns >= 3 else { return false }
+
+        // Count "real" words: whitespace tokens that contain >= 2 letters. This
+        // ignores stray fillers ("um", "uh") and punctuation-only fragments.
+        let realWords = raw
+            .split(whereSeparator: { $0.isWhitespace })
+            .filter { token in
+                token.unicodeScalars.filter { Character($0).isLetter }.count >= 2
+            }
+            .count
+
+        // Pure junk: 3+ ellipsis runs and essentially no substantive words.
+        return realWords <= ellipsisRuns / 2
+    }
+
+    /// Count runs of ASCII "..." (3+ dots) plus standalone Unicode ellipses "…".
+    private static func countEllipsisRuns(_ raw: String) -> Int {
+        var runs = 0
+        var dotStreak = 0
+        for ch in raw {
+            if ch == "." {
+                dotStreak += 1
+            } else {
+                if dotStreak >= 3 { runs += 1 }
+                dotStreak = 0
+                if ch == "\u{2026}" { runs += 1 }
+            }
+        }
+        if dotStreak >= 3 { runs += 1 }
+        return runs
+    }
+
 }

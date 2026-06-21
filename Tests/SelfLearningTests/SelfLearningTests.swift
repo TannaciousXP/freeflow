@@ -157,134 +157,166 @@ struct SelfLearningTests {
             TranscriptionGarbageFilter.isLikelyGarbage(text: text, durationSeconds: dur)
         }
 
+        // DESIGN: the filter is CONTENT-anchored. A transcript is only dropped
+        // when it carries a CONTENT signal that implies NO real speech — it IS a
+        // blank-audio token, it is entirely non-alphabetic, or it is pure ellipsis
+        // fragmentation. Duration/WPS and comma-fragmentation are WEAK signals
+        // that may only ever *combine with* a content signal; they can never drop
+        // a transcript that contains normal real words. When in doubt, don't flag.
+
         // --- Positives (MUST flag) ---
 
-        // Pure ellipsis fragmentation + interjection (2 ambiguous signals combine).
+        // Blank-audio token IS the whole transcript (unambiguous content signal).
         check(
-            "flags ellipsis + interjection fragmentation",
-            garbage("Okay, this is... oop, safety. Sir, hotel to zero, by the path."),
+            "flags [BLANK_AUDIO] (whole transcript) at 10s",
+            garbage("[BLANK_AUDIO]", 10.0),
             "expected garbage"
         )
 
-        // Explicit blank-audio token stands alone (unambiguous signal).
+        // (silence) standalone bracketed token is the whole transcript.
         check(
-            "flags [BLANK_AUDIO] token alone",
-            garbage("[BLANK_AUDIO]"),
+            "flags (silence) (whole transcript)",
+            garbage("(silence)", 6.0),
             "expected garbage"
         )
 
-        // (silence) marker stands alone.
+        // Pure ellipsis / non-alphabetic transcript — no real words at all.
         check(
-            "flags (silence) token alone",
-            garbage("(silence)"),
+            "flags pure ellipsis transcript at 8s",
+            garbage("... ... ...", 8.0),
             "expected garbage"
         )
 
-        // Heavy comma-fragmentation (3+ short chunks) + ellipsis = 2 signals.
+        // Unicode ellipsis only, nothing else.
         check(
-            "flags comma-spam fragmentation with ellipsis",
-            garbage("uh, no, so, by, the... path"),
+            "flags lone unicode ellipsis",
+            garbage("\u{2026}", 4.0),
             "expected garbage"
         )
 
-        // Near-empty transcript on a long clip = extreme word/duration mismatch
-        // (Whisper basically gave up on noisy audio). Flags alone. This is the
-        // LocalFlow failure mode: e.g. 9s of audio → "Tested." Direction matters —
-        // the ported signal catches TOO FEW words per second, not too many.
+        // Genuinely long ellipsis-junk transcript on a short clip: dominated by
+        // ellipsis fragmentation (content signal) and combines with the weak
+        // signals (comma-fragmentation + word-rate on a short clip).
         check(
-            "flags extreme word-rate mismatch (long clip, near-empty text)",
-            garbage("Tested.", 9.0),
-            "expected garbage"
-        )
-
-        // CJK extreme char-rate mismatch on a long clip flags alone.
-        check(
-            "flags extreme CJK char-rate mismatch",
-            garbage("好", 30.0),
+            "flags long ellipsis-junk fragmentation on short clip",
+            garbage("..., ..., um..., ..., ..., uh..., ...", 2.0),
             "expected garbage"
         )
 
         // --- Negatives (MUST NOT flag — regression guard for real dictation) ---
+        // All use a realistic duration where the production path would have one,
+        // because parseTranscript ALWAYS has the audio duration.
 
         check(
             "keeps a normal short phrase",
-            !garbage("okay let's ship it"),
+            !garbage("okay let's ship it", 2.0),
             "false positive"
         )
 
         check(
             "keeps a single sentence with one comma",
-            !garbage("Send the proposal to Sarah, please."),
+            !garbage("Send the proposal to Sarah, please.", 3.0),
             "false positive"
         )
 
         check(
             "keeps a normal multi-sentence dictation",
-            !garbage("I went to the store this morning. It was raining hard. I bought an umbrella."),
+            !garbage("I went to the store this morning. It was raining hard. I bought an umbrella.", 8.0),
             "false positive"
         )
 
-        // The just-shipped list formatting must survive: a real list dictation.
+        // The just-shipped list formatting must survive — the big regression:
+        // 3 short comma chunks + 0.67 wps on a 6s clip must NOT drop a real list.
         check(
-            "keeps a real list dictation (eggs, milk, and bread)",
-            !garbage("eggs, milk, and bread"),
+            "keeps a real list dictation (eggs, milk, and bread) @ 6s",
+            !garbage("eggs, milk, and bread", 6.0),
+            "false positive"
+        )
+
+        // Short list, short slow clip — comma-fragmentation + low wps together
+        // must not drop it (no content signal present).
+        check(
+            "keeps a short list (first, second, third) @ 5s",
+            !garbage("first, second, third", 5.0),
+            "false positive"
+        )
+
+        // Extreme-low-wps standalone is UNSAFE: "yes" on a 3s clip = 0.33 wps.
+        check(
+            "keeps a legit short answer 'yes' @ 3s",
+            !garbage("yes", 3.0),
             "false positive"
         )
 
         check(
-            "keeps a legit short answer 'yes'",
-            !garbage("yes"),
+            "keeps a legit short answer 'no problem' @ 4s",
+            !garbage("no problem", 4.0),
             "false positive"
         )
 
+        // A single, slow word on a long clip (extreme low wps) must still survive
+        // — it is a real word, so no content signal, so no drop.
         check(
-            "keeps a legit short answer 'no problem'",
-            !garbage("no problem"),
+            "keeps a single real word on a long clip ('Tested.' @ 9s)",
+            !garbage("Tested.", 9.0),
             "false positive"
         )
 
-        // One ellipsis only (single ambiguous signal) is NOT enough to flag.
+        // One hesitation ellipsis among real words is normal speech.
         check(
-            "keeps a single hesitation ellipsis",
-            !garbage("I think... maybe Friday works."),
+            "keeps a single hesitation ellipsis @ 4s",
+            !garbage("I think... maybe Friday works.", 4.0),
             "false positive"
         )
 
-        // A normal-length dictation on a matching-length clip is fine.
+        // Substring false-trigger guard: "loop"/"scooped" must NOT match the
+        // "oop " interjection token.
         check(
-            "keeps normal dictation with sensible duration",
-            !garbage("Let's schedule the meeting for next Tuesday afternoon.", 3.0),
+            "keeps speech containing 'loop'/'scooped' (no substring trigger)",
+            !garbage("I scooped the data into a loop", 4.0),
             "false positive"
         )
 
-        // A real, longer list with commas + duration must survive (no false fragment flag,
-        // chunks longer than 3 words each).
+        // A blank-token string embedded in REAL dictated speech must survive —
+        // the token is not the whole transcript, so it is not a content signal.
         check(
-            "keeps a longer real list dictation",
-            !garbage("for the trip we need sunscreen and towels, a cooler full of drinks, and the beach chairs"),
+            "keeps real speech that literally contains '(pause)'",
+            !garbage("Add a dramatic (pause) right before the punch line.", 5.0),
+            "false positive"
+        )
+
+        // A real, longer list with commas + duration must survive.
+        check(
+            "keeps a longer real list dictation @ 8s",
+            !garbage("for the trip we need sunscreen and towels, a cooler full of drinks, and the beach chairs", 8.0),
             "false positive"
         )
 
         // Empty / whitespace is not flagged as garbage here (existing pipeline handles emptiness).
         check(
             "empty string is not flagged",
-            !garbage(""),
+            !garbage("", 5.0),
             "false positive"
         )
 
         // CJK normal speech on a sensible clip must NOT trip the char-rate signal.
         check(
-            "keeps normal CJK speech",
+            "keeps normal CJK speech @ 5s",
             !garbage("我们今天下午开会讨论这个项目的进度", 5.0),
             "false positive"
         )
 
-        // Spaceless non-CJK scripts (Thai here) have no word spacing, so the
-        // word-rate signal would undercount them to ~1 token and falsely flag
-        // legit long speech on a long clip. The duration signal is skipped for
-        // them — this must NOT be flagged.
+        // CJK comma-list: chunks to 1 word each + low cps, but no content signal,
+        // so a real CJK list must NOT be dropped.
         check(
-            "keeps normal Thai speech on a long clip (no false word-rate flag)",
+            "keeps a real CJK comma list @ 5s",
+            !garbage("苹果，牛奶，面包", 5.0),
+            "false positive"
+        )
+
+        // Spaceless non-CJK script (Thai) on a long clip must NOT trip word-rate.
+        check(
+            "keeps normal Thai speech on a long clip @ 8s",
             !garbage("สวัสดีครับวันนี้เราจะประชุมกันเรื่องโครงการใหม่ในช่วงบ่าย", 8.0),
             "false positive"
         )
