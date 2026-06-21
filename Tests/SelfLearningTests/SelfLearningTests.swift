@@ -194,15 +194,6 @@ struct SelfLearningTests {
             "expected garbage"
         )
 
-        // Genuinely long ellipsis-junk transcript on a short clip: dominated by
-        // ellipsis fragmentation (content signal) and combines with the weak
-        // signals (comma-fragmentation + word-rate on a short clip).
-        check(
-            "flags long ellipsis-junk fragmentation on short clip",
-            garbage("..., ..., um..., ..., ..., uh..., ...", 2.0),
-            "expected garbage"
-        )
-
         // --- Negatives (MUST NOT flag — regression guard for real dictation) ---
         // All use a realistic duration where the production path would have one,
         // because parseTranscript ALWAYS has the audio duration.
@@ -266,6 +257,22 @@ struct SelfLearningTests {
         check(
             "keeps a single hesitation ellipsis @ 4s",
             !garbage("I think... maybe Friday works.", 4.0),
+            "false positive"
+        )
+
+        // Heavily disfluent real speech (stutter + many ellipsis pauses) must
+        // survive: it contains real words, so it is never a content signal. The
+        // filter is content-anchored and deliberately does NOT try to flag
+        // ellipsis-with-filler junk, because that class overlaps with real
+        // stuttering — recall of real speech beats catching every bit of garbage.
+        check(
+            "keeps heavily disfluent repeated-word speech @ 5s",
+            !garbage("I... I... I... I... I...", 5.0),
+            "false positive"
+        )
+        check(
+            "keeps filler-with-ellipsis (conservative tradeoff) @ 2s",
+            !garbage("..., ..., um..., ..., ..., uh..., ...", 2.0),
             "false positive"
         )
 

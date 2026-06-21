@@ -15,9 +15,9 @@ import Foundation
 /// CONTENT-ANCHORED:
 ///
 /// - A **content signal** implies there was no real speech at all — the
-///   transcript IS a blank-audio token, it is entirely non-alphabetic, or it is
-///   pure ellipsis fragmentation. Real speech always contains real words, so a
-///   content signal is safe to act on alone.
+///   transcript IS a blank-audio token, or it is entirely non-alphabetic (only
+///   punctuation, ellipsis and symbols, e.g. "..." / "…, …, …"). Real speech
+///   always contains real words, so a content signal is safe to act on alone.
 /// - **Weak signals** (audio-duration / words-per-second mismatch, heavy
 ///   comma-fragmentation) overlap with legitimate short or slow speech and real
 ///   lists, so they may ONLY ever *combine with* a content signal. They can
@@ -36,9 +36,9 @@ import Foundation
 enum TranscriptionGarbageFilter {
 
     /// Returns true when `text` looks like transcription garbage and should be
-    /// dropped. A content signal (blank-audio token, no alphabetic content, or
-    /// pure ellipsis fragmentation) is always required; `durationSeconds` never
-    /// causes a drop on its own.
+    /// dropped. A content signal (blank-audio token, or no real alphanumeric
+    /// content) is always required; `durationSeconds` never causes a drop on its
+    /// own.
     static func isLikelyGarbage(text: String, durationSeconds: Double?) -> Bool {
         _ = durationSeconds // reserved for future content-gated combination; see doc comment
         let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -57,16 +57,9 @@ enum TranscriptionGarbageFilter {
         // C2: the transcript has no real content at all — only punctuation,
         // ellipsis, symbols and whitespace. Letters OR digits both count as
         // content (numbers, times, prices are real dictation), so only a string
-        // that is purely punctuation/symbols is garbage.
+        // that is purely punctuation/symbols is garbage. This is what catches
+        // pure trailing-off junk like "..." / "…, …, …" (no letters at all).
         if !containsRealContent(raw) {
-            return true
-        }
-
-        // C3: pure ellipsis fragmentation — the transcript is dominated by
-        // ellipsis runs with almost no real words. "I think... maybe Friday
-        // works." (one ellipsis, real words) is NOT this; "..., ..., um..., ..."
-        // is. Requires a content signal's worth of evidence to stand alone.
-        if isPureEllipsisFragmentation(raw) {
             return true
         }
 
@@ -146,48 +139,6 @@ enum TranscriptionGarbageFilter {
             return true
         }
         return false
-    }
-
-    /// True when the transcript is overwhelmingly ellipsis with almost no real
-    /// letters — pure trailing-off junk. Conservative: needs multiple ellipsis
-    /// runs AND very few alphabetic characters, so genuine hesitation ("I
-    /// think... maybe Friday works.") and dense CJK/Thai speech with ellipsis
-    /// pauses (which have no whitespace to tokenize) both survive.
-    ///
-    /// Measured in LETTERS, not whitespace tokens, so spacing differences across
-    /// scripts can't turn real speech into "one token" and falsely flag it.
-    private static func isPureEllipsisFragmentation(_ raw: String) -> Bool {
-        // Require MANY ellipsis runs (>= 5). Short disfluent speech — common in
-        // CJK, e.g. "嗯...好...行..." (3 runs) — must never reach this rule, since
-        // a few characters is normal real content for those scripts.
-        let ellipsisRuns = countEllipsisRuns(raw)
-        guard ellipsisRuns >= 5 else { return false }
-
-        // Total real-content characters (letters in any script + digits).
-        let contentCount = raw.filter { $0.isLetter || $0.isNumber }.count
-
-        // Pure junk: 5+ ellipsis runs and content no greater than the run count
-        // (i.e. on the order of one stray filler char per run — "um"/"uh"). Any
-        // genuine utterance, even a hesitant one, carries far more real content
-        // than ellipses, so it is kept. When in doubt, don't flag.
-        return contentCount <= ellipsisRuns
-    }
-
-    /// Count runs of ASCII "..." (3+ dots) plus standalone Unicode ellipses "…".
-    private static func countEllipsisRuns(_ raw: String) -> Int {
-        var runs = 0
-        var dotStreak = 0
-        for ch in raw {
-            if ch == "." {
-                dotStreak += 1
-            } else {
-                if dotStreak >= 3 { runs += 1 }
-                dotStreak = 0
-                if ch == "\u{2026}" { runs += 1 }
-            }
-        }
-        if dotStreak >= 3 { runs += 1 }
-        return runs
     }
 
 }
