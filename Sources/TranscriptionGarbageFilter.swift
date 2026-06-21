@@ -54,10 +54,11 @@ enum TranscriptionGarbageFilter {
             return true
         }
 
-        // C2: the transcript contains no alphabetic content at all — only
-        // punctuation, ellipsis, symbols, digits and whitespace. Real speech
-        // always transcribes to letters in some script, so this is garbage.
-        if !containsAlphabeticContent(raw) {
+        // C2: the transcript has no real content at all — only punctuation,
+        // ellipsis, symbols and whitespace. Letters OR digits both count as
+        // content (numbers, times, prices are real dictation), so only a string
+        // that is purely punctuation/symbols is garbage.
+        if !containsRealContent(raw) {
             return true
         }
 
@@ -119,10 +120,12 @@ enum TranscriptionGarbageFilter {
     }
 
     /// If `raw` is a single fully-bracketed/parenthesized token (e.g. "[x]" or
-    /// "(x)") with no other content, return the inner text; otherwise nil.
+    /// "(x)") with no other content, return the inner text; otherwise nil. Only
+    /// `[...]` and `(...)` are recognized — Whisper never emits `{...}` markers,
+    /// and brace-wrapped text can be real dictated code/JSON.
     private static func bracketedInner(_ raw: String) -> String? {
         guard let first = raw.first, let last = raw.last else { return nil }
-        let pairs: [(Character, Character)] = [("[", "]"), ("(", ")"), ("{", "}")]
+        let pairs: [(Character, Character)] = [("[", "]"), ("(", ")")]
         for (open, close) in pairs where first == open && last == close {
             let inner = String(raw.dropFirst().dropLast())
             // Reject if the inner text itself contains another bracket of the
@@ -134,11 +137,12 @@ enum TranscriptionGarbageFilter {
         return nil
     }
 
-    /// True if the transcript contains at least one alphabetic character in ANY
-    /// script (Latin, CJK, Thai, Cyrillic, …). If it contains none, it is pure
-    /// punctuation/symbols/digits and carries no real speech.
-    private static func containsAlphabeticContent(_ raw: String) -> Bool {
-        for scalar in raw.unicodeScalars where Character(scalar).isLetter {
+    /// True if the transcript contains at least one letter (ANY script: Latin,
+    /// CJK, Thai, Cyrillic, …) or digit. If it contains none, it is pure
+    /// punctuation/symbols and carries no real speech. Digits count so dictated
+    /// numbers ("555 1234", "$20", "10:30") are never dropped.
+    private static func containsRealContent(_ raw: String) -> Bool {
+        for ch in raw where ch.isLetter || ch.isNumber {
             return true
         }
         return false
@@ -153,18 +157,20 @@ enum TranscriptionGarbageFilter {
     /// Measured in LETTERS, not whitespace tokens, so spacing differences across
     /// scripts can't turn real speech into "one token" and falsely flag it.
     private static func isPureEllipsisFragmentation(_ raw: String) -> Bool {
+        // Require MANY ellipsis runs (>= 5). Short disfluent speech — common in
+        // CJK, e.g. "嗯...好...行..." (3 runs) — must never reach this rule, since
+        // a few characters is normal real content for those scripts.
         let ellipsisRuns = countEllipsisRuns(raw)
-        guard ellipsisRuns >= 3 else { return false }
+        guard ellipsisRuns >= 5 else { return false }
 
-        // Total alphabetic characters across any script.
-        let letterCount = raw.unicodeScalars.filter { Character($0).isLetter }.count
+        // Total real-content characters (letters in any script + digits).
+        let contentCount = raw.filter { $0.isLetter || $0.isNumber }.count
 
-        // Pure junk: many ellipsis runs but almost no letters. Allow up to a
-        // couple of letters per ellipsis run (stray fillers like "um"/"uh"); any
-        // transcript with real substance has far more letters than that and is
-        // kept. A real word averages well over 2 letters, so e.g. 3 ellipses with
-        // 6+ letters of real content survives.
-        return letterCount <= ellipsisRuns * 2
+        // Pure junk: 5+ ellipsis runs and content no greater than the run count
+        // (i.e. on the order of one stray filler char per run — "um"/"uh"). Any
+        // genuine utterance, even a hesitant one, carries far more real content
+        // than ellipses, so it is kept. When in doubt, don't flag.
+        return contentCount <= ellipsisRuns
     }
 
     /// Count runs of ASCII "..." (3+ dots) plus standalone Unicode ellipses "…".

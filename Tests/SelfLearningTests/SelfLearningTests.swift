@@ -360,6 +360,40 @@ struct SelfLearningTests {
             "false positive"
         )
 
+        // Dictated numbers have no letters but ARE real content — must survive,
+        // both as a plain number and as a number read with ellipsis pauses.
+        check(
+            "keeps a dictated number (no letters) @ 4s",
+            !garbage("555 1234", 4.0),
+            "false positive"
+        )
+        check(
+            "keeps a price/time dictation @ 3s",
+            !garbage("$20 at 10:30", 3.0),
+            "false positive"
+        )
+        check(
+            "keeps a phone number read with ellipsis pauses @ 6s",
+            !garbage("555... 123... 4567...", 6.0),
+            "false positive"
+        )
+
+        // Short, disfluent CJK speech with ellipsis pauses ("um... good... ok...")
+        // is real content and must survive — few characters is normal for CJK.
+        check(
+            "keeps short disfluent CJK speech with ellipses @ 4s",
+            !garbage("嗯...好...行...", 4.0),
+            "false positive"
+        )
+
+        // Brace-wrapped text is never a Whisper marker (Whisper uses [..]/(..));
+        // it can be real dictated code/JSON, so it must NOT be dropped.
+        check(
+            "keeps brace-wrapped '{silence}' (real dictated text)",
+            !garbage("{silence}", 3.0),
+            "false positive"
+        )
+
         print("\n---\nPassed: \(passed)\nFailed: \(failed)")
         exit(failed == 0 ? 0 : 1)
     }
