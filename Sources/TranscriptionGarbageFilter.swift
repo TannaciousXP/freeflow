@@ -85,10 +85,13 @@ enum TranscriptionGarbageFilter {
     private static func isBlankAudioToken(_ raw: String) -> Bool {
         let lower = raw.lowercased()
 
-        // Exact whole-transcript markers.
+        // Exact whole-transcript markers. ONLY bracketed/parenthesized forms (or
+        // the underscored machine token "blank_audio") are listed — bare words
+        // like "silence", "music", "pause" are valid dictation and must NOT be
+        // dropped, so they are deliberately excluded here.
         let exactMarkers: Set<String> = [
             "[blank_audio]", "(blank_audio)", "blank_audio",
-            "[silence]", "(silence)", "silence",
+            "[silence]", "(silence)",
             "[pause]", "(pause)",
             "[speaking]", "(speaking)",
             "[no speech]", "(no speech)",
@@ -142,24 +145,26 @@ enum TranscriptionGarbageFilter {
     }
 
     /// True when the transcript is overwhelmingly ellipsis with almost no real
-    /// words — pure trailing-off junk. Conservative: needs multiple ellipsis runs
-    /// AND very little alphabetic content so genuine hesitation ("I think...")
-    /// never qualifies.
+    /// letters — pure trailing-off junk. Conservative: needs multiple ellipsis
+    /// runs AND very few alphabetic characters, so genuine hesitation ("I
+    /// think... maybe Friday works.") and dense CJK/Thai speech with ellipsis
+    /// pauses (which have no whitespace to tokenize) both survive.
+    ///
+    /// Measured in LETTERS, not whitespace tokens, so spacing differences across
+    /// scripts can't turn real speech into "one token" and falsely flag it.
     private static func isPureEllipsisFragmentation(_ raw: String) -> Bool {
         let ellipsisRuns = countEllipsisRuns(raw)
         guard ellipsisRuns >= 3 else { return false }
 
-        // Count "real" words: whitespace tokens that contain >= 2 letters. This
-        // ignores stray fillers ("um", "uh") and punctuation-only fragments.
-        let realWords = raw
-            .split(whereSeparator: { $0.isWhitespace })
-            .filter { token in
-                token.unicodeScalars.filter { Character($0).isLetter }.count >= 2
-            }
-            .count
+        // Total alphabetic characters across any script.
+        let letterCount = raw.unicodeScalars.filter { Character($0).isLetter }.count
 
-        // Pure junk: 3+ ellipsis runs and essentially no substantive words.
-        return realWords <= ellipsisRuns / 2
+        // Pure junk: many ellipsis runs but almost no letters. Allow up to a
+        // couple of letters per ellipsis run (stray fillers like "um"/"uh"); any
+        // transcript with real substance has far more letters than that and is
+        // kept. A real word averages well over 2 letters, so e.g. 3 ellipses with
+        // 6+ letters of real content survives.
+        return letterCount <= ellipsisRuns * 2
     }
 
     /// Count runs of ASCII "..." (3+ dots) plus standalone Unicode ellipses "…".

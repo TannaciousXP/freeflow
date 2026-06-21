@@ -321,6 +321,45 @@ struct SelfLearningTests {
             "false positive"
         )
 
+        // Bare real English words that happen to be Whisper marker words must NOT
+        // be dropped — only the BRACKETED forms are unambiguous markers.
+        check(
+            "keeps the real word 'silence' dictated alone @ 3s",
+            !garbage("silence", 3.0),
+            "false positive"
+        )
+        check(
+            "keeps the real word 'music' dictated alone @ 3s",
+            !garbage("music", 3.0),
+            "false positive"
+        )
+        check(
+            "keeps the real word 'pause' dictated alone @ 3s",
+            !garbage("pause", 3.0),
+            "false positive"
+        )
+        check(
+            "keeps a real sentence using the word 'silence'",
+            !garbage("We sat in complete silence.", 4.0),
+            "false positive"
+        )
+
+        // CJK/Thai real speech with ellipsis pauses must NOT collapse to ~1
+        // whitespace token and trip the pure-ellipsis content signal — it has
+        // plenty of real letters, so it is real speech.
+        check(
+            "keeps CJK speech with ellipsis pauses @ 6s",
+            !garbage("我在想... 也许我们应该... 等到下周再决定...", 6.0),
+            "false positive"
+        )
+        // Adversarial: CJK with NO whitespace and 3+ ellipses collapses to one
+        // whitespace token. Must NOT be dropped — it is dense with real letters.
+        check(
+            "keeps no-whitespace CJK speech with ellipses @ 6s",
+            !garbage("我在想...也许我们应该...等到下周再决定...", 6.0),
+            "false positive"
+        )
+
         print("\n---\nPassed: \(passed)\nFailed: \(failed)")
         exit(failed == 0 ? 0 : 1)
     }
