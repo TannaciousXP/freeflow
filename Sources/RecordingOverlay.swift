@@ -1,6 +1,13 @@
 import SwiftUI
 import AppKit
 
+extension Color {
+    /// Cultiv8 brand "durian yellow" — #E5C029. Used across the dictation
+    /// overlay (recording waveform + loading/preparing indicators) so the
+    /// whole flow reads as the brand accent rather than system yellow/white.
+    static let durianYellow = Color(red: 229 / 255, green: 192 / 255, blue: 41 / 255)
+}
+
 // MARK: - State
 
 final class RecordingOverlayState: ObservableObject {
@@ -571,7 +578,7 @@ struct WaveformBar: View {
 
     var body: some View {
         Capsule()
-            .fill(.yellow)
+            .fill(Color.durianYellow)
             .frame(width: 3, height: minHeight + (maxHeight - minHeight) * amplitude)
     }
 }
@@ -694,7 +701,7 @@ struct CompactWaveformBar: View {
 
     var body: some View {
         Capsule()
-            .fill(.yellow)
+            .fill(Color.durianYellow)
             .frame(width: 2, height: minHeight + (maxHeight - minHeight) * amplitude)
     }
 }
@@ -752,7 +759,7 @@ private struct ProcessingPill: View {
 
     var body: some View {
         Capsule()
-            .fill(.white)
+            .fill(Color.durianYellow)
             .frame(width: 4, height: minHeight + (maxHeight - minHeight) * amplitude)
             .opacity(opacity)
     }
@@ -767,7 +774,7 @@ struct ProcessingIndicatorView: View {
             if showsExtendedSpinner {
                 Circle()
                     .trim(from: 0.1, to: 0.9)
-                    .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .stroke(Color.durianYellow, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                     .frame(width: 16, height: 16)
                     .rotationEffect(.degrees(rotation))
                     .frame(height: 20)
@@ -810,7 +817,7 @@ struct CompactProcessingIndicatorView: View {
             if showsExtendedSpinner {
                 Circle()
                     .trim(from: 0.1, to: 0.9)
-                    .stroke(Color.white, style: StrokeStyle(lineWidth: 2.0, lineCap: .round))
+                    .stroke(Color.durianYellow, style: StrokeStyle(lineWidth: 2.0, lineCap: .round))
                     .frame(width: 12, height: 12)
                     .rotationEffect(.degrees(rotation))
                     .frame(height: 18)
@@ -892,7 +899,7 @@ private struct CompactProcessingPill: View {
 
     var body: some View {
         Capsule()
-            .fill(.white)
+            .fill(Color.durianYellow)
             .frame(width: 2, height: minHeight + (maxHeight - minHeight) * amplitude)
             .opacity(opacity)
     }
@@ -906,7 +913,7 @@ struct InitializingDotsView: View {
         HStack(spacing: 4) {
             ForEach(0..<3, id: \.self) { index in
                 Circle()
-                    .fill(.white.opacity(activeDot == index ? 0.9 : 0.25))
+                    .fill(Color.durianYellow.opacity(activeDot == index ? 0.9 : 0.25))
                     .frame(width: 4.5, height: 4.5)
                     .animation(.easeInOut(duration: 0.4), value: activeDot)
             }
@@ -1074,11 +1081,22 @@ struct SpeechBubbleView: View {
     @EnvironmentObject var state: RecordingOverlayState
 
     private var displayText: String {
-        state.liveTranscript.isEmpty ? "Listening…" : state.liveTranscript
+        if !state.liveTranscript.isEmpty { return state.liveTranscript }
+        // Empty transcript: surface the pipeline stage so the user knows
+        // whether we're still capturing audio or already working on it.
+        switch state.phase {
+        case .initializing, .recording:
+            return "Listening…"
+        default:
+            return "Processing…"
+        }
     }
 
     private var textColor: Color {
-        state.liveTranscript.isEmpty ? Color.yellow.opacity(0.55) : Color.yellow
+        // Placeholder status text ("Listening…" / "Processing…") reads dimmer
+        // than an actual streamed transcript, but stays at >=0.70 so it clears
+        // WCAG AA (4.5:1) on the black@0.85 bubble even with a light backdrop.
+        state.liveTranscript.isEmpty ? Color.durianYellow.opacity(0.70) : Color.durianYellow
     }
 
     var body: some View {
@@ -1096,11 +1114,12 @@ struct SpeechBubbleView: View {
                     .fill(Color.black.opacity(0.85))
                     .overlay(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.yellow.opacity(0.35), lineWidth: 1)
+                            .stroke(Color.durianYellow.opacity(0.35), lineWidth: 1)
                     )
             )
             .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
             .padding(4)
             .animation(.easeOut(duration: 0.12), value: state.liveTranscript)
+            .animation(.easeOut(duration: 0.12), value: state.phase)
     }
 }
