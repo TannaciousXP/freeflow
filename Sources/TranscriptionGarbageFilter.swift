@@ -80,8 +80,16 @@ enum TranscriptionGarbageFilter {
                 if cps < 2.0 {
                     signals += 1
                 }
-            } else {
-                // Latin/Cyrillic word rate. Normal speech is ~2-3 words/sec.
+            } else if !isSpacelessScriptText(raw) {
+                // Whitespace-segmented scripts (Latin, Cyrillic, Greek, Arabic,
+                // etc.). Normal speech is ~2-3 words/sec.
+                //
+                // NOTE: spaceless non-CJK scripts (Thai, Lao, Khmer, Myanmar)
+                // are deliberately excluded — `.split()` undercounts them to ~1
+                // token, which would falsely trip wps<0.4 on legit long speech.
+                // Their normal char rates aren't tuned here, so we skip the
+                // duration-mismatch signal entirely for them (text-only signals
+                // still apply). Dropping real dictation is the cardinal sin.
                 let wps = Double(wordCount(raw)) / duration
                 if wps < 0.4 {
                     return true // extreme — Whisper basically gave up; flag alone
@@ -122,5 +130,30 @@ enum TranscriptionGarbageFilter {
             }
         }
         return totalChars > 0 && (Double(cjkChars) / Double(totalChars)) >= cjkDensityThreshold
+    }
+
+    /// True if a significant fraction of `text` is from a script that does not
+    /// use whitespace to separate words (Thai, Lao, Khmer, Myanmar). These would
+    /// be undercounted by `.split()` just like CJK, but their normal char rates
+    /// differ, so the caller skips the duration-mismatch signal for them rather
+    /// than risk a false positive on legitimate long speech.
+    private static func isSpacelessScriptText(_ text: String) -> Bool {
+        var spacelessChars = 0
+        var totalChars = 0
+        for scalar in text.unicodeScalars {
+            let ch = Character(scalar)
+            if ch.isWhitespace || ch.isPunctuation || ch.isSymbol {
+                continue
+            }
+            totalChars += 1
+            let cp = scalar.value
+            if (0x0E00...0x0E7F).contains(cp) ||   // Thai
+               (0x0E80...0x0EFF).contains(cp) ||   // Lao
+               (0x1780...0x17FF).contains(cp) ||   // Khmer
+               (0x1000...0x109F).contains(cp) {     // Myanmar
+                spacelessChars += 1
+            }
+        }
+        return totalChars > 0 && (Double(spacelessChars) / Double(totalChars)) >= cjkDensityThreshold
     }
 }

@@ -279,6 +279,16 @@ struct SelfLearningTests {
             "false positive"
         )
 
+        // Spaceless non-CJK scripts (Thai here) have no word spacing, so the
+        // word-rate signal would undercount them to ~1 token and falsely flag
+        // legit long speech on a long clip. The duration signal is skipped for
+        // them — this must NOT be flagged.
+        check(
+            "keeps normal Thai speech on a long clip (no false word-rate flag)",
+            !garbage("สวัสดีครับวันนี้เราจะประชุมกันเรื่องโครงการใหม่ในช่วงบ่าย", 8.0),
+            "false positive"
+        )
+
         print("\n---\nPassed: \(passed)\nFailed: \(failed)")
         exit(failed == 0 ? 0 : 1)
     }

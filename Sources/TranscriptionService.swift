@@ -328,7 +328,10 @@ class TranscriptionService {
         os_log(
             .info,
             log: transcriptionLog,
-            "Dropping likely-garbage transcript (provider-agnostic filter): %{public}@",
+            // User dictation is sensitive — keep the text private so it is not
+            // exposed in system logs; only the count is public for debugging.
+            "Dropping likely-garbage transcript (provider-agnostic filter, len=%{public}d): %{private}@",
+            text.count,
             text
         )
         return true
