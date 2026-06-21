@@ -148,6 +148,137 @@ struct SelfLearningTests {
             PostProcessingService.formatLearnedCorrectionsPrompt([:]).isEmpty
         )
 
+        // 7. TranscriptionGarbageFilter — provider-agnostic hallucination/garbage guard.
+        //    These run without network/metadata: the function is pure and takes an
+        //    optional audio duration. False positives (dropping real dictation) are the
+        //    cardinal sin, so the negatives below are the real regression guard.
+
+        func garbage(_ text: String, _ dur: Double? = nil) -> Bool {
+            TranscriptionGarbageFilter.isLikelyGarbage(text: text, durationSeconds: dur)
+        }
+
+        // --- Positives (MUST flag) ---
+
+        // Pure ellipsis fragmentation + interjection (2 ambiguous signals combine).
+        check(
+            "flags ellipsis + interjection fragmentation",
+            garbage("Okay, this is... oop, safety. Sir, hotel to zero, by the path."),
+            "expected garbage"
+        )
+
+        // Explicit blank-audio token stands alone (unambiguous signal).
+        check(
+            "flags [BLANK_AUDIO] token alone",
+            garbage("[BLANK_AUDIO]"),
+            "expected garbage"
+        )
+
+        // (silence) marker stands alone.
+        check(
+            "flags (silence) token alone",
+            garbage("(silence)"),
+            "expected garbage"
+        )
+
+        // Heavy comma-fragmentation (3+ short chunks) + ellipsis = 2 signals.
+        check(
+            "flags comma-spam fragmentation with ellipsis",
+            garbage("uh, no, so, by, the... path"),
+            "expected garbage"
+        )
+
+        // Near-empty transcript on a long clip = extreme word/duration mismatch
+        // (Whisper basically gave up on noisy audio). Flags alone. This is the
+        // LocalFlow failure mode: e.g. 9s of audio → "Tested." Direction matters —
+        // the ported signal catches TOO FEW words per second, not too many.
+        check(
+            "flags extreme word-rate mismatch (long clip, near-empty text)",
+            garbage("Tested.", 9.0),
+            "expected garbage"
+        )
+
+        // CJK extreme char-rate mismatch on a long clip flags alone.
+        check(
+            "flags extreme CJK char-rate mismatch",
+            garbage("好", 30.0),
+            "expected garbage"
+        )
+
+        // --- Negatives (MUST NOT flag — regression guard for real dictation) ---
+
+        check(
+            "keeps a normal short phrase",
+            !garbage("okay let's ship it"),
+            "false positive"
+        )
+
+        check(
+            "keeps a single sentence with one comma",
+            !garbage("Send the proposal to Sarah, please."),
+            "false positive"
+        )
+
+        check(
+            "keeps a normal multi-sentence dictation",
+            !garbage("I went to the store this morning. It was raining hard. I bought an umbrella."),
+            "false positive"
+        )
+
+        // The just-shipped list formatting must survive: a real list dictation.
+        check(
+            "keeps a real list dictation (eggs, milk, and bread)",
+            !garbage("eggs, milk, and bread"),
+            "false positive"
+        )
+
+        check(
+            "keeps a legit short answer 'yes'",
+            !garbage("yes"),
+            "false positive"
+        )
+
+        check(
+            "keeps a legit short answer 'no problem'",
+            !garbage("no problem"),
+            "false positive"
+        )
+
+        // One ellipsis only (single ambiguous signal) is NOT enough to flag.
+        check(
+            "keeps a single hesitation ellipsis",
+            !garbage("I think... maybe Friday works."),
+            "false positive"
+        )
+
+        // A normal-length dictation on a matching-length clip is fine.
+        check(
+            "keeps normal dictation with sensible duration",
+            !garbage("Let's schedule the meeting for next Tuesday afternoon.", 3.0),
+            "false positive"
+        )
+
+        // A real, longer list with commas + duration must survive (no false fragment flag,
+        // chunks longer than 3 words each).
+        check(
+            "keeps a longer real list dictation",
+            !garbage("for the trip we need sunscreen and towels, a cooler full of drinks, and the beach chairs"),
+            "false positive"
+        )
+
+        // Empty / whitespace is not flagged as garbage here (existing pipeline handles emptiness).
+        check(
+            "empty string is not flagged",
+            !garbage(""),
+            "false positive"
+        )
+
+        // CJK normal speech on a sensible clip must NOT trip the char-rate signal.
+        check(
+            "keeps normal CJK speech",
+            !garbage("我们今天下午开会讨论这个项目的进度", 5.0),
+            "false positive"
+        )
+
         print("\n---\nPassed: \(passed)\nFailed: \(failed)")
         exit(failed == 0 ? 0 : 1)
     }

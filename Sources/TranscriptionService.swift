@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import os.log
 
 private let transcriptionLog = OSLog(subsystem: "com.zachlatta.freeflow", category: "Transcription")
@@ -124,8 +125,25 @@ class TranscriptionService {
             ))
         }
 
-        return try parseTranscript(from: data)
+        return try parseTranscript(from: data, audioFileURL: fileURL)
     }
+
+    /// Best-effort audio duration (seconds) read from the recorded file, used by
+    /// the provider-agnostic garbage filter's content/duration mismatch signal.
+    /// Returns nil if the duration can't be determined (filter then skips that
+    /// one signal and relies on the text-only signals).
+    private func audioDurationSeconds(for fileURL: URL) -> Double? {
+        // AVAudioFile reads the duration synchronously from the local file
+        // (length / sampleRate) without the deprecated AVAsset.duration accessor
+        // and without the async-loading dance that path now requires.
+        guard let audioFile = try? AVAudioFile(forReading: fileURL) else { return nil }
+        let sampleRate = audioFile.processingFormat.sampleRate
+        guard sampleRate > 0 else { return nil }
+        let seconds = Double(audioFile.length) / sampleRate
+        guard seconds.isFinite, seconds > 0 else { return nil }
+        return seconds
+    }
+
     private func audioContentType(for fileName: String) -> String {
         if fileName.lowercased().hasSuffix(".wav") {
             return "audio/wav"
@@ -264,10 +282,19 @@ class TranscriptionService {
 
     private let hallucinationNoSpeechThreshold = 0.1
 
-    private func parseTranscript(from data: Data) throws -> String {
+    private func parseTranscript(from data: Data, audioFileURL: URL? = nil) throws -> String {
+        let duration = audioFileURL.flatMap { audioDurationSeconds(for: $0) }
+
         if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
            let text = json["text"] as? String {
+            // Existing exact-match + no_speech_prob filter (kept intact). Returns
+            // "" so the dropped transcript surfaces as an empty result.
             if isHallucination(text: text, json: json) {
+                return ""
+            }
+            // Additive provider-agnostic guard: catches garbage when the provider
+            // omits Whisper segments/no_speech metadata (Groq/OpenAI cloud).
+            if isProviderAgnosticGarbage(text: text, durationSeconds: duration) {
                 return ""
             }
             return text
@@ -282,7 +309,29 @@ class TranscriptionService {
             throw TranscriptionError.pollFailed("Invalid response")
         }
 
+        // Plain-text responses carry no metadata at all, so apply the
+        // provider-agnostic guard here too.
+        if isProviderAgnosticGarbage(text: text, durationSeconds: duration) {
+            return ""
+        }
+
         return text
+    }
+
+    /// Wrapper around `TranscriptionGarbageFilter` that logs a dropped transcript
+    /// for debugging. Kept separate from `isHallucination` so the original
+    /// exact-match filter is unchanged.
+    private func isProviderAgnosticGarbage(text: String, durationSeconds: Double?) -> Bool {
+        guard TranscriptionGarbageFilter.isLikelyGarbage(text: text, durationSeconds: durationSeconds) else {
+            return false
+        }
+        os_log(
+            .info,
+            log: transcriptionLog,
+            "Dropping likely-garbage transcript (provider-agnostic filter): %{public}@",
+            text
+        )
+        return true
     }
 
     private func isHallucination(text: String, json: [String: Any]) -> Bool {

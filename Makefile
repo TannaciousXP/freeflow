@@ -33,6 +33,7 @@ TEST_SOURCES = \
 	Sources/CorrectionLearningService.swift \
 	Sources/PostInsertionMonitor.swift \
 	Sources/PostProcessingService.swift \
+	Sources/TranscriptionGarbageFilter.swift \
 	Tests/SelfLearningTests/SelfLearningTests.swift
 
 .PHONY: all clean run icon dmg codesign-dmg notarize test
