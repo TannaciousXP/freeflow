@@ -401,6 +401,15 @@ struct SelfLearningTests {
             "false positive"
         )
 
+        // Bare, unbracketed "blank_audio" is a plausible spoken variable/token
+        // name — only the BRACKETED forms are unambiguous markers, so this must
+        // NOT be dropped.
+        check(
+            "keeps bare 'blank_audio' (real spoken token) @ 3s",
+            !garbage("blank_audio", 3.0),
+            "false positive"
+        )
+
         print("\n---\nPassed: \(passed)\nFailed: \(failed)")
         exit(failed == 0 ? 0 : 1)
     }

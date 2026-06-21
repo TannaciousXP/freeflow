@@ -12,27 +12,26 @@ import Foundation
 /// Idea-ported from LocalFlow's `_is_likely_garbage`, but tightened around one
 /// rule: **dropping real user dictation is unacceptable.** We favor recall of
 /// real speech over catching every piece of garbage. The filter is therefore
-/// CONTENT-ANCHORED:
+/// CONTENT-ANCHORED — it drops a transcript only when a content signal implies
+/// there was no real speech at all:
 ///
-/// - A **content signal** implies there was no real speech at all — the
-///   transcript IS a blank-audio token, or it is entirely non-alphabetic (only
-///   punctuation, ellipsis and symbols, e.g. "..." / "…, …, …"). Real speech
-///   always contains real words, so a content signal is safe to act on alone.
-/// - **Weak signals** (audio-duration / words-per-second mismatch, heavy
-///   comma-fragmentation) overlap with legitimate short or slow speech and real
-///   lists, so they may ONLY ever *combine with* a content signal. They can
-///   never, on their own or together, drop a transcript that contains real
-///   words.
+/// - C1: the whole transcript IS a bracketed/parenthesized blank-audio marker
+///   (e.g. `[BLANK_AUDIO]`, `(silence)`). Matched as the whole string, never a
+///   substring, and bare words like "silence"/"pause" are excluded.
+/// - C2: the transcript has no real alphanumeric content at all — only
+///   punctuation, ellipsis and symbols (e.g. "...", "…", ".,.,."). Letters AND
+///   digits both count as real content, so numbers/prices/times survive.
 ///
-/// Net effect: we flag iff a content signal is present. Because no real-word
-/// transcript can carry a content signal, the worst case is "some garbage slips
-/// through", never "real dictation dropped". When in doubt, don't flag.
+/// Everything else is kept. Word-rate / duration mismatch, comma-fragmentation,
+/// and ellipsis-with-filler ("um...", "I... I...") are deliberately NOT used to
+/// drop anything: each overlaps with real short, slow, list, or disfluent
+/// speech, which is exactly the false-positive class we refuse to risk. The
+/// worst case is "some garbage slips through", never "real dictation dropped".
+/// When in doubt, don't flag.
 ///
-/// `durationSeconds` is accepted (the production path always has it) so the
-/// signature is ready to combine a duration/word-rate signal with a content
-/// signal in future tuning, but it currently never causes a drop on its own —
-/// duration- and comma-based signals overlap with real short/slow speech and
-/// real lists, which is exactly the false-positive class we refuse to risk.
+/// `durationSeconds` is accepted (the production path always has it) and kept in
+/// the signature for possible future content-gated combination, but it currently
+/// never causes a drop on its own.
 enum TranscriptionGarbageFilter {
 
     /// Returns true when `text` looks like transcription garbage and should be
@@ -65,10 +64,11 @@ enum TranscriptionGarbageFilter {
 
         // ── No content signal → keep the transcript. ──
         //
-        // Every transcript that reaches this point contains real words. Weak
-        // signals (comma-fragmentation, word/char-rate mismatch) overlap with
-        // real short/slow speech and real lists, so they are deliberately NOT
-        // consulted here: dropping real dictation is the cardinal sin.
+        // Every transcript that reaches this point contains real letters or
+        // digits. Weak signals (comma-fragmentation, word/char-rate mismatch,
+        // ellipsis-with-filler) all overlap with real short/slow/disfluent
+        // speech and real lists, so they are deliberately NOT consulted here.
+        // Dropping real dictation is the cardinal sin.
         return false
     }
 
@@ -79,12 +79,12 @@ enum TranscriptionGarbageFilter {
     private static func isBlankAudioToken(_ raw: String) -> Bool {
         let lower = raw.lowercased()
 
-        // Exact whole-transcript markers. ONLY bracketed/parenthesized forms (or
-        // the underscored machine token "blank_audio") are listed — bare words
-        // like "silence", "music", "pause" are valid dictation and must NOT be
-        // dropped, so they are deliberately excluded here.
+        // Exact whole-transcript markers. ONLY bracketed/parenthesized forms are
+        // listed — bare words like "silence", "music", "pause", and even the
+        // machine-looking "blank_audio" are all valid dictation (e.g. a spoken
+        // variable name) and must NOT be dropped, so they are excluded here.
         let exactMarkers: Set<String> = [
-            "[blank_audio]", "(blank_audio)", "blank_audio",
+            "[blank_audio]", "(blank_audio)",
             "[silence]", "(silence)",
             "[pause]", "(pause)",
             "[speaking]", "(speaking)",
