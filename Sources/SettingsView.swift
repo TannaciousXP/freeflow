@@ -2740,8 +2740,14 @@ struct LearnedCorrectionsSettingsView: View {
         .onAppear {
             appState.refreshLearnedCorrections()
             if appState.showFirstRunDisclosure {
-                showingDisclosure = true
                 appState.showFirstRunDisclosure = false
+                // Defer to the next runloop tick: flipping the sheet binding
+                // synchronously inside .onAppear races the view's mount-into-
+                // window and SwiftUI silently drops the presentation. Setting
+                // it after the current cycle lets the host view settle first.
+                DispatchQueue.main.async {
+                    showingDisclosure = true
+                }
             }
         }
         .onChange(of: appState.showFirstRunDisclosure) { newValue in
